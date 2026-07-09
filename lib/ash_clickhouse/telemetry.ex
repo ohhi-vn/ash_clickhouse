@@ -12,20 +12,18 @@ defmodule AshClickhouse.Telemetry do
   @doc """
   Spans a query execution, emitting telemetry start/stop/exception events.
 
-  Returns the result of `fun`, or re-raises after emitting an exception event.
+  Returns the result of `fun` directly. Exceptions raised inside `fun` are
+  allowed to propagate: `:telemetry.span/3` catches them, emits the
+  `[:ash_clickhouse, :query, :exception]` event, and reraises, so callers
+  can translate the reraised error into an Ash-friendly error.
   """
-  @spec span(Ash.Resource.t() | nil, atom(), String.t(), (() -> term())) :: term()
+  @spec span(Ash.Resource.t() | nil, atom(), String.t(), (-> term())) :: term()
   def span(resource, event, query, fun) do
-    metadata = %{resource: resource, query: query}
-    :telemetry.span([:ash_clickhouse, :query, event], metadata, fn -> safe_run(fun) end)
-  end
+    metadata = %{resource: resource, query: query, event: event}
 
-  defp safe_run(fun) do
-    try do
-      {:ok, fun.()}
-    rescue
-      e ->
-        {:error, e}
-    end
+    :telemetry.span([:ash_clickhouse, :query], metadata, fn ->
+      result = fun.()
+      {result, %{resource: resource, query: query, event: event}}
+    end)
   end
 end

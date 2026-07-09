@@ -3,6 +3,6 @@ defmodule AshClickhouse.TestDomain do
   use Ash.Domain
 
   resources do
-    resource AshClickhouse.TestResource
+    resource(AshClickhouse.TestResource)
   end
 end

@@ -18,6 +18,10 @@ defmodule AshClickhouse.DataLayerTest do
       assert DataLayer.can?(nil, :bulk_create)
     end
 
+    test "supports streaming reads" do
+      assert DataLayer.can?(nil, :stream)
+    end
+
     test "does not support unsupported features" do
       refute DataLayer.can?(nil, :transact)
       refute DataLayer.can?(nil, :lock)
@@ -30,7 +34,8 @@ defmodule AshClickhouse.DataLayerTest do
 
   describe "qualified_table/1" do
     test "builds a qualified table name for a resource" do
-      assert DataLayer.qualified_table(AshClickhouse.TestResource) == "test_users"
+      assert DataLayer.qualified_table(AshClickhouse.TestResource) ==
+               "`ash_clickhouse_test`.test_users"
     end
   end
 

@@ -94,14 +94,14 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
     {parts, params} =
       Enum.reduce(filters, {[], []}, fn filter, {parts_acc, params_acc} ->
         case build_predicate(filter) do
-          {sql, new_params} -> {[sql | parts_acc], new_params ++ params_acc}
+          {sql, new_params} -> {[sql | parts_acc], params_acc ++ new_params}
           nil -> {parts_acc, params_acc}
         end
       end)
 
     case Enum.reverse(parts) do
       [] -> {"", []}
-      parts -> {" WHERE " <> Enum.join(parts, " AND "), Enum.reverse(params)}
+      parts -> {" WHERE " <> Enum.join(parts, " AND "), params}
     end
   end
 
@@ -135,87 +135,116 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
     end
   end
 
-  defp build_predicate(%{op: :not, expr: expr}) do
-    case build_predicate(expr) do
-      {sql, params} -> {"NOT (#{sql})", params}
+  defp build_predicate(%Ash.Query.BooleanExpression{op: :not, left: left, right: right}) do
+    child = if right != nil, do: right, else: left
+
+    case build_predicate(child) do
+      {sql, params} -> {"(NOT #{sql})", params}
       nil -> nil
     end
   end
 
-  # Ash 3.0 filter maps use `:operator` / `:left` / `:right` shape.
+  # Ash 3.x represents `not` as a dedicated operator struct rather than a
+  # BooleanExpression with an `:expr` field.
+  defp build_predicate(%Ash.Query.Not{expression: expression}) do
+    case build_predicate(expression) do
+      {sql, params} -> {"(NOT #{sql})", params}
+      nil -> nil
+    end
+  end
+
+  # Ash 3.0 operator structs (e.g. `Ash.Query.Operator.GreaterThanOrEqual`) carry
+  # `:operator`, `:left` (an `Ash.Query.Ref`) and `:right` (a raw value).
+  defp build_predicate(%{operator: operator, left: %Ash.Query.Ref{} = left, right: right}) do
+    build_comparison(operator, ref_name(left), right)
+  end
+
+  defp build_predicate(%{operator: operator, left: %{name: name}, right: %{value: value}}) do
+    build_comparison(operator, name, value)
+  end
+
+  defp build_predicate(%{operator: operator, left: %{name: name}, right: right}) do
+    build_comparison(operator, name, right)
+  end
+
   defp build_predicate(%{operator: operator, left: left, right: right}) do
     build_comparison(operator, left, right)
   end
 
   # Older shape uses `:op` / `:name` / `:right`.
   defp build_predicate(%{op: operator, name: name, right: right}) do
-    build_comparison(operator, %{name: name}, right)
+    build_comparison(operator, name, right)
   end
 
   defp build_predicate(_), do: nil
 
+  defp ref_name(%Ash.Query.Ref{attribute: %{name: name}}), do: name
+  defp ref_name(%Ash.Query.Ref{attribute: name}), do: name
+  defp ref_name(name) when is_atom(name), do: name
+  defp ref_name(name) when is_binary(name), do: name
+
   @spec build_comparison(atom(), term(), term()) :: {String.t(), list()} | nil
   defp build_comparison(operator, left, right)
 
-  defp build_comparison(:eq, %{name: name}, %{value: value}) do
+  defp build_comparison(:eq, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " = ?", [value]}
   end
 
-  defp build_comparison(:==, %{name: name}, %{value: value}) do
+  defp build_comparison(:==, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " = ?", [value]}
   end
 
-  defp build_comparison(:not_eq, %{name: name}, %{value: value}) do
+  defp build_comparison(:not_eq, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " != ?", [value]}
   end
 
-  defp build_comparison(:>, %{name: name}, %{value: value}) do
+  defp build_comparison(:>, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " > ?", [value]}
   end
 
-  defp build_comparison(:>=, %{name: name}, %{value: value}) do
+  defp build_comparison(:>=, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " >= ?", [value]}
   end
 
-  defp build_comparison(:<, %{name: name}, %{value: value}) do
+  defp build_comparison(:<, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " < ?", [value]}
   end
 
-  defp build_comparison(:<=, %{name: name}, %{value: value}) do
+  defp build_comparison(:<=, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " <= ?", [value]}
   end
 
-  defp build_comparison(:in, %{name: name}, %{value: value}) when is_list(value) do
+  defp build_comparison(:in, name, value) when (is_atom(name) or is_binary(name)) and is_list(value) do
     placeholders = Enum.map_join(value, ", ", fn _ -> "?" end)
     {"#{Identifier.quote_name(name)} IN (#{placeholders})", value}
   end
 
-  defp build_comparison(:in, %{name: name}, %{value: value}) do
+  defp build_comparison(:in, name, value) when is_atom(name) or is_binary(name) do
     {Identifier.quote_name(name) <> " IN (?)", [value]}
   end
 
-  defp build_comparison(:not_in, %{name: name}, %{value: value}) when is_list(value) do
+  defp build_comparison(:not_in, name, value) when (is_atom(name) or is_binary(name)) and is_list(value) do
     placeholders = Enum.map_join(value, ", ", fn _ -> "?" end)
     {"#{Identifier.quote_name(name)} NOT IN (#{placeholders})", value}
   end
 
-  defp build_comparison(:is_nil, %{name: name}, %{value: true}) do
+  defp build_comparison(:is_nil, name, true) when is_atom(name) or is_binary(name) do
     {"#{Identifier.quote_name(name)} IS NULL", []}
   end
 
-  defp build_comparison(:is_nil, %{name: name}, %{value: false}) do
+  defp build_comparison(:is_nil, name, false) when is_atom(name) or is_binary(name) do
     {"#{Identifier.quote_name(name)} IS NOT NULL", []}
   end
 
-  defp build_comparison(:contains, %{name: name}, %{value: value}) do
+  defp build_comparison(:contains, name, value) when is_atom(name) or is_binary(name) do
     {"positionCaseInsensitive(#{Identifier.quote_name(name)}, ?) > 0", [to_string(value)]}
   end
 
-  defp build_comparison(:starts_with, %{name: name}, %{value: value}) do
+  defp build_comparison(:starts_with, name, value) when is_atom(name) or is_binary(name) do
     {"#{Identifier.quote_name(name)} LIKE ?", [to_string(value) <> "%"]}
   end
 
-  defp build_comparison(:ends_with, %{name: name}, %{value: value}) do
+  defp build_comparison(:ends_with, name, value) when is_atom(name) or is_binary(name) do
     {"#{Identifier.quote_name(name)} LIKE ?", ["%" <> to_string(value)]}
   end
 
@@ -238,7 +267,13 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
     collect_columns(left) ++ collect_columns(right)
   end
 
-  defp collect_columns(%{op: :not, expr: expr}), do: collect_columns(expr)
+  defp collect_columns(%Ash.Query.Not{expression: expression}) do
+    collect_columns(expression)
+  end
+
+  defp collect_columns(%{operator: _operator, left: %Ash.Query.Ref{} = left, right: _right}) do
+    [ref_name(left)]
+  end
 
   defp collect_columns(%{name: name}) when is_atom(name), do: [name]
   defp collect_columns(%{left: %{name: name}}) when is_atom(name), do: [name]
@@ -258,7 +293,7 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
     end
   end
 
-  def qualified_table(table, _database), do: to_string(table)
+  def qualified_table(table, database), do: qualified_table(to_string(table), database)
 
   @doc """
   Quotes a ClickHouse identifier.

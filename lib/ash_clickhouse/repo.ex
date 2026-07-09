@@ -39,6 +39,9 @@ defmodule AshClickhouse.Repo do
         AshClickhouse.Connection.child_spec([name: name] ++ conn_opts)
       end
 
+      @doc false
+      def __ash_clickhouse_repo__, do: true
+
       @doc "Returns the configured database."
       @impl AshClickhouse.Repo
       @spec database() :: String.t() | nil
@@ -55,15 +58,37 @@ defmodule AshClickhouse.Repo do
       end
 
       @doc "Executes a SQL query."
-      @impl AshClickhouse.Repo
       @spec query(String.t(), list(), keyword()) ::
               {:ok, ClickHouse.Query.t()} | {:error, term()}
       def query(sql, params \\ [], opts \\ []) do
         AshClickhouse.Connection.query(__MODULE__, sql, params, opts)
       end
 
-      @doc "Executes a SQL query, raising on error."
+      @doc """
+      Inserts rows into a table. See `AshClickhouse.Connection.insert_rows/5`.
+      """
       @impl AshClickhouse.Repo
+      @spec insert_rows(String.t(), String.t(), [list()], keyword()) ::
+              {:ok, term()} | {:error, term()}
+      def insert_rows(table, statement, rows, opts \\ []) do
+        AshClickhouse.Connection.insert_rows(__MODULE__, table, statement, rows, opts)
+      end
+
+      @doc """
+      Returns true if the ClickHouse server is reachable, false otherwise.
+
+      Useful for readiness checks: it issues a trivial `SELECT 1` and returns a
+      boolean rather than raising.
+      """
+      @spec ping() :: boolean()
+      def ping do
+        case __MODULE__.query("SELECT 1", []) do
+          {:ok, _} -> true
+          {:error, _} -> false
+        end
+      end
+
+      @doc "Executes a SQL query, raising on error."
       @spec query!(String.t(), list(), keyword()) :: ClickHouse.Query.t()
       def query!(sql, params \\ [], opts \\ []) do
         AshClickhouse.Connection.query!(__MODULE__, sql, params, opts)
@@ -103,7 +128,7 @@ defmodule AshClickhouse.Repo do
         end
       end
 
-      defoverridable config: 0
+      defoverridable config: 0, query: 3, query!: 3
     end
   end
 
@@ -112,6 +137,8 @@ defmodule AshClickhouse.Repo do
   @callback connection() :: AshClickhouse.Connection.t() | nil
   @callback create_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
   @callback drop_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
+  @callback insert_rows(String.t(), String.t(), [list()], keyword()) ::
+              {:ok, term()} | {:error, term()}
   @callback child_spec(keyword()) :: Supervisor.child_spec()
 
   @doc "Converts repo config to ClickHouse connection options."
@@ -123,6 +150,7 @@ defmodule AshClickhouse.Repo do
       name: repo_module,
       url: Keyword.get(config, :url, "http://localhost:8123"),
       database: Keyword.get(config, :database),
+      pool_size: Keyword.get(config, :pool_size, 10),
       pool_timeout: Keyword.get(config, :pool_timeout, 30_000),
       ping_retry: Keyword.get(config, :ping_retry, 30_000)
     ]

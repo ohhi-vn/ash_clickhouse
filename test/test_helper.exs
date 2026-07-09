@@ -14,11 +14,13 @@ case :ets.whereis(:ash_clickhouse_repo_cache) do
     :ok
 end
 
-# Load test support files
-Code.require_file("test/support/test_repo.ex")
-Code.require_file("test/support/test_resource.ex")
-Code.require_file("test/support/test_domain.ex")
-Code.require_file("test/support/container_engine.ex")
-Code.require_file("test/support/clickhouse_container.ex")
+# Load test support files. They are required explicitly here (rather than via
+# `elixirc_paths`) so they are guaranteed to be loaded for every test, including
+# when a single test file is run with an explicit path filter. Requiring them
+# here avoids relying on `elixirc_paths` and the "redefining module" warnings
+# that double-compilation would otherwise produce.
+for file <- Path.wildcard(Path.join("test/support", "**/*.ex")) do
+  Code.require_file(file)
+end
 
 ExUnit.start(max_cases: 1)

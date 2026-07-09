@@ -9,6 +9,7 @@ defmodule Mix.Tasks.AshClickhouse.Setup do
 
   @impl Mix.Task
   def run(_args) do
+    Mix.Task.run("compile")
     repos = find_repos()
 
     if repos == [] do

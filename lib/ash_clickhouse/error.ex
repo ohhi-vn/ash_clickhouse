@@ -16,6 +16,10 @@ defmodule AshClickhouse.Error do
       %__MODULE__{message: to_string(message), reason: reason}
     end
 
+    def from_error(message) when is_binary(message) do
+      %__MODULE__{message: message}
+    end
+
     def from_error(reason) do
       %__MODULE__{message: inspect(reason), reason: reason}
     end

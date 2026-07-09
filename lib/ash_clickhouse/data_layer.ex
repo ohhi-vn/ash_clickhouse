@@ -70,7 +70,6 @@ defmodule AshClickhouse.DataLayer do
   alias AshClickhouse.Query
   alias AshClickhouse.Telemetry
 
-  @default_query_timeout 30_000
   @default_batch_size 1000
   @max_batch_size 100_000
 
@@ -89,6 +88,7 @@ defmodule AshClickhouse.DataLayer do
                         :bulk_create,
                         :update_query,
                         :destroy_query,
+                        :stream,
                         :calculate,
                         :composite_primary_key,
                         :nested_expressions,
@@ -112,12 +112,16 @@ defmodule AshClickhouse.DataLayer do
   def can?(_resource_or_dsl, {:filter_relationship, _}), do: false
   def can?(_resource_or_dsl, {:exists, :unrelated}), do: false
   def can?(_resource_or_dsl, {:aggregate_relationship, _}), do: false
+
   def can?(_resource_or_dsl, {:aggregate, kind}) when kind in [:count, :sum, :avg, :min, :max],
     do: true
+
   def can?(_resource_or_dsl, {:aggregate, _}), do: false
+
   def can?(_resource_or_dsl, {:query_aggregate, kind})
       when kind in [:count, :sum, :avg, :min, :max],
       do: true
+
   def can?(_resource_or_dsl, {:query_aggregate, _}), do: false
   def can?(_resource_or_dsl, {:sort, _}), do: true
   def can?(_resource_or_dsl, {:filter_expr, _}), do: true
@@ -132,6 +136,7 @@ defmodule AshClickhouse.DataLayer do
   def can?(_resource_or_dsl, :update_query), do: true
   def can?(_resource_or_dsl, :destroy_query), do: true
   def can?(_resource_or_dsl, :bulk_create), do: true
+  def can?(_resource_or_dsl, :stream), do: true
   def can?(_resource_or_dsl, :multitenancy), do: true
   def can?(_resource_or_dsl, :transact), do: false
   def can?(_resource_or_dsl, :lock), do: false
@@ -146,7 +151,10 @@ defmodule AshClickhouse.DataLayer do
   def can?(_resource_or_dsl, :through_relationship), do: false
   def can?(_resource_or_dsl, :bulk_create_with_partial_success), do: false
   def can?(_resource_or_dsl, :bulk_upsert_return_skipped), do: false
-  def can?(_resource_or_dsl, feature) when is_atom(feature), do: MapSet.member?(@supported_features, feature)
+
+  def can?(_resource_or_dsl, feature) when is_atom(feature),
+    do: MapSet.member?(@supported_features, feature)
+
   def can?(_resource_or_dsl, _other), do: false
 
   @impl Ash.DataLayer
@@ -193,9 +201,7 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec run_query(t(), Ash.Resource.t()) :: {:ok, [Ash.Resource.t()]} | {:error, term()}
   def run_query(data_layer_query, resource) do
-    %Query{repo: repo, table: table, database: database, filters: filters, sorts: sorts} =
-      data_layer_query
-
+    %Query{repo: repo} = data_layer_query
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
 
     params = convert_uuid_params(params, resource)
@@ -210,47 +216,59 @@ defmodule AshClickhouse.DataLayer do
             records =
               rows
               |> Enum.map(&to_ash_record(&1, resource, columns))
-              |> maybe_apply_in_memory_sort(sorts)
 
-            records
+            {:ok, records}
 
           {:ok, _} ->
-            []
+            {:ok, []}
 
-          error ->
+          {:error, _} = error ->
             error
         end
       end)
 
     case result do
-      {:ok, {:ok, records}} ->
+      {:ok, records} ->
         %Query{context: context} = data_layer_query
         aggregates = Map.get(context, :aggregates, [])
         records = apply_calculations(records, context)
         records = attach_aggregates(records, aggregates, resource, repo, opts)
         {:ok, records}
 
-      {:ok, {:error, _} = err} ->
-        err
-
-      {:error, e} ->
-        handle_result({:error, e})
+      {:error, _} = err ->
+        handle_result(err)
     end
-  rescue
-    e in [AshClickhouse.Error.ClickhouseError] -> reraise(e, __STACKTRACE__)
-    e -> handle_result({:error, e})
   end
 
-  defp maybe_apply_in_memory_sort(records, []), do: records
-  defp maybe_apply_in_memory_sort(records, nil), do: records
+  @doc """
+  Returns a stream of Ash records for the given query, consuming ClickHouse's
+  native query stream instead of materializing every row into memory.
 
-  defp maybe_apply_in_memory_sort(records, sorts) when is_list(sorts) do
-    Enum.sort_by(records, fn record ->
-      Enum.map(sorts, fn
-        {field, _} -> {Map.get(record, field) == nil, Map.get(record, field)}
-        field when is_atom(field) -> {Map.get(record, field) == nil, Map.get(record, field)}
-      end)
+  This is the natural read path for large OLAP scans/reports. The returned
+  stream yields decoded Ash records one at a time as chunks arrive.
+
+  ## Options
+
+  - `:mutations_sync` is ignored for reads.
+  - any other options are forwarded to the underlying ClickHouse client.
+  """
+  @spec stream(t(), Ash.Resource.t(), keyword()) :: Enumerable.t(Ash.Resource.t())
+  def stream(data_layer_query, resource, opts \\ []) do
+    %Query{repo: repo} = data_layer_query
+
+    {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
+    params = convert_uuid_params(params, resource)
+    opts = build_query_opts(resource) ++ opts
+
+    repo = if is_nil(repo), do: repo(resource), else: repo
+
+    stream = ClickHouse.stream!(repo, query, params, opts)
+
+    Stream.map(stream, fn chunk ->
+      {_columns, rows} = ClickHouse.Format.JSONCompactEachRow.decode(chunk)
+      Enum.map(rows, &to_ash_record(&1, resource))
     end)
+    |> Stream.flat_map(& &1)
   end
 
   # ============================================================================
@@ -259,6 +277,11 @@ defmodule AshClickhouse.DataLayer do
 
   @impl Ash.DataLayer
   @spec filter(t(), term(), Ash.Resource.t()) :: {:ok, t()}
+  def filter(data_layer_query, %Ash.Filter{expression: expression}, _resource) do
+    %Query{filters: filters} = data_layer_query
+    {:ok, %{data_layer_query | filters: [expression | filters]}}
+  end
+
   def filter(data_layer_query, filter, _resource) do
     %Query{filters: filters} = data_layer_query
     {:ok, %{data_layer_query | filters: [filter | filters]}}
@@ -305,7 +328,11 @@ defmodule AshClickhouse.DataLayer do
           attribute = Info.multitenancy_attribute(resource)
 
           if attribute do
-            filter(data_layer_query, %{name: attribute, op: :eq, right: %{value: tenant}}, resource)
+            filter(
+              data_layer_query,
+              %{name: attribute, op: :eq, right: %{value: tenant}},
+              resource
+            )
           else
             {:ok, %{data_layer_query | tenant: tenant}}
           end
@@ -360,18 +387,30 @@ defmodule AshClickhouse.DataLayer do
 
     return_records? = Keyword.get(opts, :return_records?, true)
 
-    rows =
+    {fields, rows} =
       changesets
       |> Enum.map(fn changeset ->
         attrs = changeset_to_insert_attrs(changeset, resource)
         attrs_to_row(attrs, resource)
       end)
+      |> build_insert_rows(resource)
+
+    insert_opts = build_insert_opts(resource, opts)
+
+    statement =
+      IO.iodata_to_binary([
+        "INSERT INTO ",
+        qualified,
+        " (",
+        Enum.join(fields, ", "),
+        ") FORMAT JSONCompactEachRow"
+      ])
 
     result =
       rows
       |> Enum.chunk_every(batch_size)
       |> Enum.reduce_while(:ok, fn chunk, _acc ->
-        case repo.insert_rows(qualified, chunk) do
+        case repo.insert_rows(qualified, statement, chunk, insert_opts) do
           {:ok, _} -> {:cont, :ok}
           {:error, error} -> {:halt, {:error, error}}
         end
@@ -407,7 +446,8 @@ defmodule AshClickhouse.DataLayer do
         where_clause
       ])
 
-    with {:ok, _} <- repo.query(query, set_values ++ where_params, build_opts(resource)) do
+    with {:ok, _} <-
+           repo.query(query, set_values ++ where_params, build_opts(resource, changeset.context, 1)) do
       run_query(data_layer_query, resource)
     end
   end
@@ -415,7 +455,7 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec destroy_query(t(), Ash.Changeset.t(), keyword(), Ash.Resource.t()) ::
           :ok | {:error, term()}
-  def destroy_query(data_layer_query, _changeset, _opts, _resource) do
+  def destroy_query(data_layer_query, changeset, _opts, _resource) do
     resource = data_layer_query.resource
     repo = repo(resource)
     qualified = qualified_table(resource)
@@ -431,7 +471,9 @@ defmodule AshClickhouse.DataLayer do
         where_clause
       ])
 
-    with {:ok, _} <- repo.query(query, where_params, build_opts(resource)), do: :ok
+    with {:ok, _} <-
+           repo.query(query, where_params, build_opts(resource, changeset.context, 1)),
+         do: :ok
   end
 
   @impl Ash.DataLayer
@@ -487,8 +529,11 @@ defmodule AshClickhouse.DataLayer do
     results =
       Enum.reduce_while(aggregates, %{}, fn aggregate, acc ->
         case build_aggregate_query(aggregate, qualified, where_clause) do
-          {:error, reason} -> {:halt, {:error, reason}}
-          {query, params} -> run_one_aggregate(repo, query, where_params ++ params, acc, aggregate, resource)
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+
+          {query, params} ->
+            run_one_aggregate(repo, query, where_params ++ params, acc, aggregate, resource)
         end
       end)
 
@@ -503,7 +548,7 @@ defmodule AshClickhouse.DataLayer do
 
     case repo.query(query, params, opts) do
       {:ok, %ClickHouse.Result{rows: [[value]]}} ->
-        {:cont, Map.put(acc, aggregate.name, value)}
+        {:cont, Map.put(acc, aggregate.name, decode_aggregate(value, aggregate.kind))}
 
       {:ok, %ClickHouse.Result{rows: []}} ->
         {:cont, Map.put(acc, aggregate.name, Map.get(aggregate, :default_value))}
@@ -513,12 +558,29 @@ defmodule AshClickhouse.DataLayer do
     end
   end
 
+  # ClickHouse returns aggregate results as strings; decode them to the
+  # appropriate Elixir numeric type so callers get `10` rather than `"10"`.
+  defp decode_aggregate(value, :count), do: Types.decode_value(value, %{type: :integer})
+
+  defp decode_aggregate(value, kind) when kind in [:sum, :min, :max] do
+    if is_binary(value) and String.contains?(value, ".") do
+      Types.decode_value(value, %{type: :float})
+    else
+      Types.decode_value(value, %{type: :integer})
+    end
+  end
+
+  defp decode_aggregate(value, :avg), do: Types.decode_value(value, %{type: :float})
+  defp decode_aggregate(value, _kind), do: value
+
   @impl Ash.DataLayer
   @spec calculate(t(), Ash.Query.Calculation.t(), Ash.Resource.t()) :: {:ok, t()}
   def calculate(data_layer_query, calculation, _resource) do
     %Query{context: context} = data_layer_query
     calculations = Map.get(context, :calculations, [])
-    {:ok, %{data_layer_query | context: Map.put(context, :calculations, [calculation | calculations])}}
+
+    {:ok,
+     %{data_layer_query | context: Map.put(context, :calculations, [calculation | calculations])}}
   end
 
   # ============================================================================
@@ -598,7 +660,7 @@ defmodule AshClickhouse.DataLayer do
         repo = if is_nil(repo), do: Dsl.repo(resource), else: repo
 
         if is_nil(repo) do
-          raise """
+          raise AshClickhouse.Error.ConfigurationError, """
           No repo configured for #{inspect(resource)}.
 
           Add a repo to your resource's clickhouse DSL block:
@@ -619,8 +681,11 @@ defmodule AshClickhouse.DataLayer do
 
   defp ensure_repo_cache do
     case :ets.whereis(:ash_clickhouse_repo_cache) do
-      :undefined -> :ets.new(:ash_clickhouse_repo_cache, [:named_table, :public, {:read_concurrency, true}])
-      _ -> :ok
+      :undefined ->
+        :ets.new(:ash_clickhouse_repo_cache, [:named_table, :public, {:read_concurrency, true}])
+
+      _ ->
+        :ok
     end
   end
 
@@ -663,7 +728,7 @@ defmodule AshClickhouse.DataLayer do
 
   defp do_update(attrs, changeset, resource, repo) do
     if map_size(attrs) == 0 do
-      {:ok, to_ash_record(changeset.attributes, resource)}
+      {:ok, to_ash_record(changeset.data, resource)}
     else
       qualified = qualified_table(resource)
       {set_clauses, values} = build_set_clauses(attrs, resource)
@@ -680,7 +745,7 @@ defmodule AshClickhouse.DataLayer do
         ])
 
       case repo.query(query, values ++ pk_values, build_opts(resource)) do
-        {:ok, _} -> {:ok, to_ash_record(Map.merge(changeset.attributes, attrs), resource)}
+        {:ok, _} -> {:ok, to_ash_record(Map.merge(changeset.data, attrs), resource)}
         {:error, error} -> handle_result({:error, error})
       end
     end
@@ -752,7 +817,8 @@ defmodule AshClickhouse.DataLayer do
   # ============================================================================
 
   defp attach_aggregates(records, [], _resource, _repo, _opts), do: records
-  defp attach_aggregates(records, _aggregates, _resource, _repo, _opts) when is_nil(_repo), do: records
+
+  defp attach_aggregates(records, _aggregates, _resource, nil, _opts), do: records
 
   defp attach_aggregates(records, aggregates, resource, repo, opts) do
     pkey = Info.primary_key(resource)
@@ -826,15 +892,18 @@ defmodule AshClickhouse.DataLayer do
   end
 
   defp aggregate_field_to_cql(:count, nil, _resource), do: "COUNT(*)"
-  defp aggregate_field_to_cql(kind, field, resource), do: "#{String.upcase(to_string(kind))}(#{resolve_aggregate_field(field, resource)})"
+
+  defp aggregate_field_to_cql(kind, field, resource),
+    do: "#{String.upcase(to_string(kind))}(#{resolve_aggregate_field(field, resource)})"
 
   defp build_pk_where_from_map(pk_values, resource) do
     {clauses, values} =
       Enum.reduce(pk_values, {[], []}, fn {k, v}, {cs, vs} ->
-        {["#{Identifier.quote_name(k)} = ?" | cs], [v | vs]}
+        {["#{Identifier.quote_name(to_string(k))} = ?" | cs], [v | vs]}
       end)
 
-    {Enum.reverse(clauses) |> Enum.join(" AND "), :lists.reverse(values)}
+    {Enum.reverse(clauses) |> Enum.join(" AND "),
+     convert_uuid_params(:lists.reverse(values), resource)}
   end
 
   # ============================================================================
@@ -871,44 +940,50 @@ defmodule AshClickhouse.DataLayer do
 
   defp build_field_value_pairs(attrs, resource) do
     uuid_fields = Types.uuid_attribute_names(resource)
+    attr_map = attribute_map(resource)
 
     {fields, values} =
       Enum.reduce(attrs, {[], []}, fn {k, v}, {fs, vs} ->
-        value =
-          if uuid_field?(k, v, uuid_fields) do
-            case Types.uuid_string_to_binary(v) do
-              {:ok, bin} -> bin
-              _ -> v
-            end
-          else
-            v
-          end
-
+        value = encode_attr_value(k, v, attr_map, uuid_fields)
         {[Identifier.quote_name(to_string(k)) | fs], [value | vs]}
       end)
 
-    {Enum.reverse(fields), :lists.reverse(values)}
+    {Enum.reverse(fields), convert_uuid_params(:lists.reverse(values), resource)}
   end
 
   defp build_set_clauses(attrs, resource) do
     uuid_fields = Types.uuid_attribute_names(resource)
+    attr_map = attribute_map(resource)
 
     {clauses, values} =
       Enum.reduce(attrs, {[], []}, fn {k, v}, {cs, vs} ->
-        value =
-          if uuid_field?(k, v, uuid_fields) do
-            case Types.uuid_string_to_binary(v) do
-              {:ok, bin} -> bin
-              _ -> v
-            end
-          else
-            v
-          end
-
+        value = encode_attr_value(k, v, attr_map, uuid_fields)
         {["#{Identifier.quote_name(to_string(k))} = ?" | cs], [value | vs]}
       end)
 
-    {Enum.reverse(clauses), :lists.reverse(values)}
+    {Enum.reverse(clauses), convert_uuid_params(:lists.reverse(values), resource)}
+  end
+
+  defp attribute_map(resource) do
+    resource
+    |> Info.attributes()
+    |> Enum.reduce(%{}, fn attr, acc -> Map.put(acc, attr.name, attr) end)
+  end
+
+  defp encode_attr_value(k, v, attr_map, uuid_fields) do
+    cond do
+      uuid_field?(k, v, uuid_fields) ->
+        case Types.uuid_string_to_binary(v) do
+          {:ok, bin} -> bin
+          _ -> v
+        end
+
+      attr = Map.get(attr_map, k) ->
+        Types.encode_value(v, attr)
+
+      true ->
+        v
+    end
   end
 
   defp build_pk_where_clause(changeset, resource) do
@@ -924,13 +999,14 @@ defmodule AshClickhouse.DataLayer do
   defp build_where_clause(nil, _resource), do: {"", []}
   defp build_where_clause([], _resource), do: {"", []}
 
-  defp build_where_from_map(pk_map, _resource) do
+  defp build_where_from_map(pk_map, resource) do
     {clauses, values} =
       Enum.reduce(pk_map, {[], []}, fn {k, v}, {cs, vs} ->
         {["#{Identifier.quote_name(to_string(k))} = ?" | cs], [v | vs]}
       end)
 
-    {Enum.reverse(clauses) |> Enum.join(" AND "), :lists.reverse(values)}
+    {Enum.reverse(clauses) |> Enum.join(" AND "),
+     convert_uuid_params(:lists.reverse(values), resource)}
   end
 
   defp uuid_field?(k, v, uuid_fields) do
@@ -988,6 +1064,7 @@ defmodule AshClickhouse.DataLayer do
 
   defp generate_uuid do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
     "#{format_hex(a, 8)}-#{format_hex(b, 4)}-#{format_hex(c, 4)}-#{format_hex(d, 4)}-#{format_hex(e, 12)}"
   end
 
@@ -998,9 +1075,11 @@ defmodule AshClickhouse.DataLayer do
   end
 
   defp get_primary_key_from_changeset(changeset, resource) do
+    source = changeset.data
+
     Enum.reduce(Info.attributes(resource), %{}, fn attr, acc ->
       if attr.primary_key? do
-        case Map.get(changeset.attributes, attr.name) do
+        case Map.get(source, attr.name) do
           nil -> acc
           val -> Map.put(acc, attr.name, val)
         end
@@ -1010,10 +1089,70 @@ defmodule AshClickhouse.DataLayer do
     end)
   end
 
-  defp attrs_to_row(attrs, _resource) do
-    attrs
-    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
-    |> Map.new()
+  defp attrs_to_row(attrs, resource) do
+    uuid_fields = Types.uuid_attribute_names(resource)
+    attr_map = attribute_map(resource)
+
+    Enum.reduce(attrs, %{}, fn {k, v}, acc ->
+      Map.put(acc, to_string(k), encode_attr_value(k, v, attr_map, uuid_fields))
+    end)
+  end
+
+  # Builds a consistent (fields, rows) pair for bulk insert. Fields are emitted
+  # in the resource's attribute declaration order; each row is a value list
+  # aligned to that field order, encoded in a JSON-friendly form suitable for
+  # the `JSONCompactEachRow` insert format (UUIDs as strings, maps/arrays as
+  # native JSON values).
+  defp build_insert_rows(rows, resource) do
+    field_atoms =
+      resource
+      |> Info.attributes()
+      |> Enum.map(& &1.name)
+
+    fields =
+      resource
+      |> Info.attributes()
+      |> Enum.map(&Identifier.quote_name(&1.name))
+
+    encoded_rows =
+      Enum.map(rows, fn row ->
+        Enum.map(field_atoms, fn name ->
+          case Map.fetch(row, to_string(name)) do
+            {:ok, v} -> encode_bulk_value(v, name, resource)
+            :error -> nil
+          end
+        end)
+      end)
+
+    {fields, encoded_rows}
+  end
+
+  # Encoding for the JSON bulk insert path. Unlike the parameterized single
+  # insert, ClickHouse's JSONCompactEachRow expects native JSON values, so we
+  # keep UUIDs as their canonical string form and leave maps/arrays as Elixir
+  # maps/lists (Jason serializes them directly).
+  defp encode_bulk_value(value, name, resource) do
+    uuid_fields = Types.uuid_attribute_names(resource)
+
+    cond do
+      name in uuid_fields and is_binary(value) and byte_size(value) == 16 ->
+        case Types.uuid_binary_to_string(value) do
+          {:ok, str} -> str
+          _ -> value
+        end
+
+      name in uuid_fields and is_binary(value) and byte_size(value) == 36 ->
+        value
+
+      is_map(value) ->
+        value
+
+      is_list(value) ->
+        value
+
+      true ->
+        value
+    end
   end
 
   defp stream_bulk_records(rows, resource) do
@@ -1028,7 +1167,11 @@ defmodule AshClickhouse.DataLayer do
     to_ash_record(attrs, resource, [])
   end
 
-  defp to_ash_record(row, resource, columns) when is_list(row) and is_list(columns) do
+  defp to_ash_record(row, resource) when is_list(row) do
+    to_ash_record(row, resource, [])
+  end
+
+  defp to_ash_record(row, resource, columns) when is_list(row) and is_list(columns) and columns != [] do
     record_map =
       row
       |> Enum.zip(columns)
@@ -1042,7 +1185,12 @@ defmodule AshClickhouse.DataLayer do
 
   defp to_ash_record(row, resource, _columns) when is_list(row) do
     attr_names = resource |> Info.attributes() |> Enum.map(& &1.name)
-    record_map = row |> Enum.zip(attr_names) |> Enum.reduce(%{}, fn {v, k}, acc -> Map.put(acc, to_string(k), v) end)
+
+    record_map =
+      row
+      |> Enum.zip(attr_names)
+      |> Enum.reduce(%{}, fn {v, k}, acc -> Map.put(acc, to_string(k), v) end)
+
     to_ash_record(record_map, resource)
   end
 
@@ -1054,7 +1202,8 @@ defmodule AshClickhouse.DataLayer do
       resource
       |> Info.attributes()
       |> Enum.reduce(%{}, fn attr, acc ->
-        value = Map.get(row, attr.name) || Map.get(row, to_string(attr.name))
+        value = Map.get(row, attr.name)
+        value = if is_nil(value), do: Map.get(row, to_string(attr.name)), else: value
 
         decoded =
           cond do
@@ -1065,10 +1214,10 @@ defmodule AshClickhouse.DataLayer do
               end
 
             attr.name in atom_fields and is_binary(value) ->
-              String.to_atom(value)
+              to_existing_atom(value)
 
             true ->
-              value
+              Types.decode_value(value, attr)
           end
 
         Map.put(acc, attr.name, decoded)
@@ -1081,12 +1230,51 @@ defmodule AshClickhouse.DataLayer do
   # Options / error handling
   # ============================================================================
 
-  defp build_opts(_resource) do
-    []
+  defp build_opts(resource), do: build_opts(resource, nil)
+
+  # Builds the option list forwarded to a query. When the caller passes a
+  # context containing `mutations_sync`, it is forwarded as ClickHouse's
+  # `mutations_sync` query setting so ALTER TABLE ... UPDATE/DELETE waits for
+  # the mutation to complete (1 = current replica, 2 = all replicas) before the
+  # subsequent read. This gives callers read-your-writes semantics for
+  # update_query/destroy_query when they opt in; the default is async.
+  defp build_opts(resource, context, default_sync \\ nil) do
+    context = if is_map(context), do: context, else: %{}
+
+    from_context =
+      Map.get(context, :mutations_sync) || Map.get(context, :private, %{})[:mutations_sync]
+
+    sync = if from_context != nil, do: from_context, else: Dsl.mutations_sync(resource) || default_sync
+
+    if sync != nil do
+      [settings: %{mutations_sync: sync}]
+    else
+      []
+    end
   end
 
   defp build_query_opts(_resource) do
     []
+  end
+
+  # ClickHouse's async_insert / wait_for_async_insert settings (recommended for
+  # high-throughput ingestion) as repo/DSL-level options, defaulting to
+  # synchronous inserts for predictable return semantics.
+  defp build_insert_opts(resource, opts) do
+    resource_opts = Dsl.insert_opts(resource)
+    merged = Keyword.merge(resource_opts, opts)
+
+    []
+    |> maybe_put(:async_insert, Keyword.get(merged, :async_insert))
+    |> maybe_put(:wait_for_async_insert, Keyword.get(merged, :wait_for_async_insert))
+  end
+
+  defp to_existing_atom(value) do
+    try do
+      String.to_existing_atom(value)
+    rescue
+      ArgumentError -> value
+    end
   end
 
   defp maybe_put(opts, _key, nil), do: opts
@@ -1098,15 +1286,16 @@ defmodule AshClickhouse.DataLayer do
   defp handle_result({:ok, _} = ok), do: ok
   defp handle_result(:ok), do: :ok
 
-  defp handle_result({:error, %mod{} = error}) when mod in [
-         ClickHouse.QueryError,
-         ClickHouse.ConnectionError,
-         ClickHouse.DatabaseError,
-         ClickHouse.ParsingError,
-         ClickHouse.StreamError,
-         ClickHouse.SystemError,
-         ClickHouse.CoordinationError
-       ] do
+  defp handle_result({:error, %mod{} = error})
+       when mod in [
+              ClickHouse.QueryError,
+              ClickHouse.ConnectionError,
+              ClickHouse.DatabaseError,
+              ClickHouse.ParsingError,
+              ClickHouse.StreamError,
+              ClickHouse.SystemError,
+              ClickHouse.CoordinationError
+            ] do
     Logger.warning("ClickHouse error: #{Exception.message(error)}")
     {:error, AshClickhouse.Error.wrap_clickhouse_error(error)}
   end

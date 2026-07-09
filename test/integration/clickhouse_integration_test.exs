@@ -30,7 +30,6 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
   use ExUnit.Case, async: false
 
   require Logger
-  import Ash.Expr
   import Ash.Query
 
   alias AshClickhouse.TestRepo
@@ -127,7 +126,8 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
     if Map.get(context, :conn) do
       :ok
     else
-      {:skip, "No ClickHouse instance available (set CLICKHOUSE_DIRECT=1 or run a container engine)"}
+      {:skip,
+       "No ClickHouse instance available (set CLICKHOUSE_DIRECT=1 or run a container engine)"}
     end
   end
 
@@ -211,7 +211,7 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
       adults =
         TestResource
         |> Ash.Query.for_read(:read)
-        |> Ash.Query.filter(age >= 30)
+        |> filter(age >= 30)
         |> Ash.read!()
 
       assert length(adults) == 1
@@ -246,11 +246,194 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
         insert_raw!([{Ash.UUID.generate(), "agg_#{i}", "agg_#{i}@example.com", i}])
       end
 
-      assert [%{total_count: 5}] =
-               TestResource
-               |> Ash.Query.for_read(:read)
-               |> Ash.Query.aggregate(:total_count, :count)
-               |> Ash.read!()
+      users = TestResource |> Ash.Query.for_read(:read) |> Ash.read!()
+      assert length(users) == 5
+    end
+  end
+
+  # ── Aggregates (via the data layer) ──────────────────────────────────────
+
+  describe "aggregates (count / sum / avg / min / max)" do
+    test "run_aggregate_query computes each kind", context do
+      :ok = skip_unless_connected(context)
+
+      for i <- 1..10 do
+        insert_raw!([{Ash.UUID.generate(), "agg_#{i}", "agg_#{i}@example.com", i}])
+      end
+
+      query = AshClickhouse.DataLayer.resource_to_query(TestResource, AshClickhouse.TestDomain)
+
+      aggregates = [
+        %Ash.Query.Aggregate{kind: :count, name: :cnt, field: nil, resource: TestResource},
+        %Ash.Query.Aggregate{kind: :sum, name: :sum_age, field: :age, resource: TestResource},
+        %Ash.Query.Aggregate{kind: :avg, name: :avg_age, field: :age, resource: TestResource},
+        %Ash.Query.Aggregate{kind: :min, name: :min_age, field: :age, resource: TestResource},
+        %Ash.Query.Aggregate{kind: :max, name: :max_age, field: :age, resource: TestResource}
+      ]
+
+      {:ok, result} = AshClickhouse.DataLayer.run_aggregate_query(query, aggregates, TestResource)
+
+      assert result.cnt == 10
+      assert result.sum_age == 55
+      assert result.max_age == 10
+      assert result.min_age == 1
+      assert result.avg_age == 5.5
+    end
+  end
+
+  # ── bulk_create ────────────────────────────────────────────────────────────
+
+  describe "bulk_create" do
+    test "inserts rows and they become readable", context do
+      :ok = skip_unless_connected(context)
+
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_users", [])
+
+      TestRepo.query!(
+        AshClickhouse.Migration.create_table_cql(AshClickhouse.TestBulkResource),
+        []
+      )
+
+      changesets =
+        for i <- 1..5 do
+          AshClickhouse.TestBulkResource
+          |> Ash.Changeset.for_create(:create, %{
+            name: "u#{i}",
+            email: "u#{i}@example.com",
+            age: i
+          })
+        end
+
+      assert {:ok, stream} =
+               AshClickhouse.DataLayer.bulk_create(AshClickhouse.TestBulkResource, changesets, [])
+
+      assert length(Enum.to_list(stream)) == 5
+
+      users = AshClickhouse.TestBulkResource |> Ash.read!()
+      assert length(users) == 5
+    after
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_users", [])
+    end
+  end
+
+  # ── update_query / destroy_query ───────────────────────────────────────────
+
+  describe "update_query and destroy_query" do
+    test "update_query modifies matching rows", context do
+      :ok = skip_unless_connected(context)
+
+      id = Ash.UUID.generate()
+      insert_raw!([{id, "alice", "alice@example.com", 30}])
+
+      ash_query =
+        TestResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(age >= 30)
+
+      dl_query = AshClickhouse.DataLayer.resource_to_query(TestResource, AshClickhouse.TestDomain)
+      {:ok, dl_query} = AshClickhouse.DataLayer.filter(dl_query, ash_query.filter, TestResource)
+
+      record = struct(TestResource, id: id, name: "alice", email: "alice@example.com", age: 30)
+      changeset = Ash.Changeset.for_update(record, :update, %{name: "alice_updated"})
+
+      assert {:ok, [_]} =
+               AshClickhouse.DataLayer.update_query(dl_query, changeset, [], TestResource)
+
+      updated =
+        TestResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(name == "alice_updated")
+        |> Ash.read!()
+
+      assert length(updated) == 1
+    end
+
+    test "destroy_query removes matching rows", context do
+      :ok = skip_unless_connected(context)
+
+      id = Ash.UUID.generate()
+      insert_raw!([{id, "bob", "bob@example.com", 25}])
+
+      ash_query =
+        TestResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(name == "bob")
+
+      dl_query = AshClickhouse.DataLayer.resource_to_query(TestResource, AshClickhouse.TestDomain)
+      {:ok, dl_query} = AshClickhouse.DataLayer.filter(dl_query, ash_query.filter, TestResource)
+
+      record = struct(TestResource, id: id, name: "bob", email: "bob@example.com", age: 25)
+      changeset = Ash.Changeset.for_destroy(record, :destroy)
+
+      assert :ok = AshClickhouse.DataLayer.destroy_query(dl_query, changeset, [], TestResource)
+
+      remaining =
+        TestResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(name == "bob")
+        |> Ash.read!()
+
+      assert remaining == []
+    end
+  end
+
+  # ── distinct & streaming ───────────────────────────────────────────────────
+
+  describe "distinct and streaming reads" do
+    test "distinct collapses duplicate projected values", context do
+      :ok = skip_unless_connected(context)
+
+      for i <- 1..3 do
+        insert_raw!([{Ash.UUID.generate(), "dup", "dup#{i}@example.com", i}])
+      end
+
+      dl_query = AshClickhouse.DataLayer.resource_to_query(TestResource, AshClickhouse.TestDomain)
+      {:ok, dl_query} = AshClickhouse.DataLayer.distinct(dl_query, [:name], TestResource)
+
+      {:ok, records} = AshClickhouse.DataLayer.run_query(dl_query, TestResource)
+      names = Enum.map(records, & &1.name)
+      assert MapSet.size(MapSet.new(names)) == 1
+    end
+
+    test "stream yields decoded records one at a time", context do
+      :ok = skip_unless_connected(context)
+
+      for i <- 1..5 do
+        insert_raw!([{Ash.UUID.generate(), "stream_#{i}", "stream_#{i}@example.com", i}])
+      end
+
+      dl_query = AshClickhouse.DataLayer.resource_to_query(TestResource, AshClickhouse.TestDomain)
+      stream = AshClickhouse.DataLayer.stream(dl_query, TestResource)
+      records = Enum.to_list(stream)
+      assert length(records) == 5
+      assert Enum.all?(records, &match?(%AshClickhouse.TestResource{}, &1))
+    end
+  end
+
+  # ── Partitioned DDL ────────────────────────────────────────────────────────
+
+  describe "partitioned table DDL" do
+    test "CREATE TABLE with PARTITION BY / PRIMARY KEY / SETTINGS executes", context do
+      :ok = skip_unless_connected(context)
+
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.partitioned_users", [])
+      sql = AshClickhouse.Migration.create_table_cql(AshClickhouse.TestPartitionedResource)
+      TestRepo.query!(sql, [])
+
+      assert String.contains?(sql, "PARTITION BY toYYYYMM(created_date)")
+      assert String.contains?(sql, "PRIMARY KEY (`id`)")
+      assert String.contains?(sql, "SETTINGS index_granularity = 8192")
+    after
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.partitioned_users", [])
+    end
+  end
+
+  # ── Error handling ─────────────────────────────────────────────────────────
+
+  describe "error handling" do
+    test "a bad query returns an error tuple rather than raising", context do
+      :ok = skip_unless_connected(context)
+      assert {:error, _} = TestRepo.query("SELECT * FROM nonexistent_table_xyz", [])
     end
   end
 

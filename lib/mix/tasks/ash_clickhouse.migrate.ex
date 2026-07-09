@@ -8,27 +8,45 @@ defmodule Mix.Tasks.AshClickhouse.Migrate do
   use Mix.Task
 
   alias AshClickhouse.Migration
+  alias AshClickhouse.DataLayer.Dsl
 
   @impl Mix.Task
   def run(_args) do
+    Mix.Task.run("compile")
     repos = find_repos()
 
     Enum.each(repos, fn repo ->
       resources = find_resources()
 
       Enum.each(resources, fn resource ->
-        if AshClickhouse.DataLayer.Dsl.migrate?(resource) do
-          statements = Migration.generate_resource_cql(resource)
+        resource_repo = Dsl.repo(resource)
 
-          Enum.each(statements, fn statement ->
-            case repo.query(statement, []) do
-              {:ok, _} ->
-                Mix.shell().info("Migrated #{inspect(resource)}")
+        if is_nil(resource_repo) or resource_repo == repo do
+          if Dsl.migrate?(resource) do
+            create_statements = Migration.generate_resource_cql(resource)
 
-              {:error, reason} ->
-                Mix.shell().error("Failed to migrate #{inspect(resource)}: #{inspect(reason)}")
-            end
-          end)
+            Enum.each(create_statements, fn statement ->
+              case repo.query(statement, []) do
+                {:ok, _} ->
+                  Mix.shell().info("Migrated #{inspect(resource)}")
+
+                {:error, reason} ->
+                  Mix.shell().error("Failed to migrate #{inspect(resource)}: #{inspect(reason)}")
+              end
+            end)
+
+            alter_statements = Migration.alter_table_cql(resource, repo)
+
+            Enum.each(alter_statements, fn statement ->
+              case repo.query(statement, []) do
+                {:ok, _} ->
+                  Mix.shell().info("Altered #{inspect(resource)}")
+
+                {:error, reason} ->
+                  Mix.shell().error("Failed to alter #{inspect(resource)}: #{inspect(reason)}")
+              end
+            end)
+          end
         end
       end)
     end)

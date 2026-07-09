@@ -52,9 +52,7 @@ defmodule AshClickhouse.ClickhouseContainer do
     CustomContainer.new(image)
     |> CustomContainer.with_exposed_port(@http_port)
     |> CustomContainer.with_env("CLICKHOUSE_DB", "default")
-    |> CustomContainer.with_wait_strategy(
-      Wait.port("0.0.0.0", @http_port, timeout, 500)
-    )
+    |> CustomContainer.with_wait_strategy(Wait.port("0.0.0.0", @http_port, timeout, 500))
     |> CustomContainer.with_auto_remove(true)
   end
 
@@ -97,7 +95,7 @@ defmodule AshClickhouse.ClickhouseContainer do
 
   @doc "Returns a ClickHouse connection URL for the running container."
   def url(%__MODULE__{container: container}) do
-    {host, port} = TestcontainerEx.endpoint(container, @http_port)
+    {host, port} = CustomContainer.endpoint(container, @http_port)
     "http://#{host}:#{port}"
   end
 end

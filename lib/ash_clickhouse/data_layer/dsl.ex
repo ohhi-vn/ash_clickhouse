@@ -1,12 +1,21 @@
 defmodule AshClickhouse.DataLayer.Dsl do
   @moduledoc """
-  DSL extensions for configuring ClickHouse-specific options on Ash resources.
+  Runtime accessors for ClickHouse-specific options configured on Ash resources.
+
+  These functions read the configuration produced by the `clickhouse` DSL block
+  (see `AshClickhouse.DataLayer.Dsl.Macros`). They are intentionally kept in a
+  separate module from the `clickhouse` macro so that importing the macro module
+  does not also import these getters — that separation lets a resource define a
+  local helper named like a DSL key (e.g. `table/1`) without it being shadowed
+  by an imported getter.
 
   ## Usage
 
       defmodule MyApp.MyResource do
         use Ash.Resource,
           data_layer: AshClickhouse.DataLayer
+
+        import AshClickhouse.DataLayer.Dsl.Macros
 
         clickhouse do
           table "my_table"
@@ -44,94 +53,9 @@ defmodule AshClickhouse.DataLayer.Dsl do
   - `:default_context` — context merged into every query/changeset
   - `:description` — human-readable description of the resource
   - `:migrate` — whether this resource is included in migrations (default `true`)
+  - `:insert_opts` — options applied to bulk inserts (e.g. `async_insert: 1`)
+  - `:mutations_sync` — default `mutations_sync` for ALTER mutations (`1`/`2`/`nil`)
   """
-
-  @doc """
-  Macro for configuring ClickHouse options in Ash resources.
-  """
-  @spec clickhouse(keyword()) :: Macro.t()
-  defmacro clickhouse(do: block) do
-    transformed =
-      Macro.prewalk(block, fn
-        {:table, meta, [value]} ->
-          set(meta, :__set_table__, value)
-
-        {:repo, meta, [value]} ->
-          set(meta, :__set_repo__, value)
-
-        {:database, meta, [value]} ->
-          set(meta, :__set_database__, value)
-
-        {:engine, meta, [value]} ->
-          set(meta, :__set_engine__, value)
-
-        {:order_by, meta, [value]} ->
-          set(meta, :__set_order_by__, value)
-
-        {:partition_by, meta, [value]} ->
-          set(meta, :__set_partition_by__, value)
-
-        {:primary_key, meta, [value]} ->
-          set(meta, :__set_primary_key__, value)
-
-        {:settings, meta, [value]} ->
-          set(meta, :__set_settings__, value)
-
-        {:base_filter, meta, [value]} ->
-          set(meta, :__set_base_filter__, value)
-
-        {:default_context, meta, [value]} ->
-          set(meta, :__set_default_context__, value)
-
-        {:description, meta, [value]} ->
-          set(meta, :__set_description__, value)
-
-        {:migrate, meta, [value]} ->
-          set(meta, :__set_migrate__, value)
-
-        other ->
-          other
-      end)
-
-    quote do
-      @ash_clickhouse_table nil
-      @ash_clickhouse_repo nil
-      @ash_clickhouse_database nil
-      @ash_clickhouse_engine "MergeTree()"
-      @ash_clickhouse_order_by nil
-      @ash_clickhouse_partition_by nil
-      @ash_clickhouse_primary_key nil
-      @ash_clickhouse_settings nil
-      @ash_clickhouse_base_filter nil
-      @ash_clickhouse_default_context nil
-      @ash_clickhouse_description nil
-      @ash_clickhouse_migrate true
-
-      unquote(transformed)
-
-      @ash_clickhouse_config %{
-        table: @ash_clickhouse_table,
-        repo: @ash_clickhouse_repo,
-        database: @ash_clickhouse_database,
-        engine: @ash_clickhouse_engine,
-        order_by: @ash_clickhouse_order_by,
-        partition_by: @ash_clickhouse_partition_by,
-        primary_key: @ash_clickhouse_primary_key,
-        settings: @ash_clickhouse_settings,
-        base_filter: @ash_clickhouse_base_filter,
-        default_context: @ash_clickhouse_default_context,
-        description: @ash_clickhouse_description,
-        migrate: @ash_clickhouse_migrate
-      }
-
-      def __ash_clickhouse__(key), do: Map.get(@ash_clickhouse_config, key)
-    end
-  end
-
-  defp set(meta, fun, value) do
-    {{:., meta, [{:__aliases__, meta, [:AshClickhouse, :DataLayer, :Dsl]}, fun]}, meta,
-     [{:__MODULE__, [], nil}, value]}
-  end
 
   # --- getters -------------------------------------------------------------
 
@@ -150,6 +74,20 @@ defmodule AshClickhouse.DataLayer.Dsl do
   @doc "Whether this resource is included in migrations (default `true`)."
   @spec migrate?(module()) :: boolean()
   def migrate?(resource), do: get_config(resource, :migrate, true)
+
+  @doc """
+  Options applied to bulk inserts for this resource (e.g.
+  `async_insert: 1, wait_for_async_insert: 1`).
+  """
+  @spec insert_opts(module()) :: keyword()
+  def insert_opts(resource), do: get_config(resource, :insert_opts, [])
+
+  @doc """
+  The default `mutations_sync` value for ALTER TABLE mutations on this resource
+  (1 = wait on current replica, 2 = wait on all replicas, nil = async).
+  """
+  @spec mutations_sync(module()) :: nil | 1 | 2
+  def mutations_sync(resource), do: get_config(resource, :mutations_sync)
 
   @doc "The configured table name."
   @spec table(module()) :: String.t() | nil
@@ -194,51 +132,4 @@ defmodule AshClickhouse.DataLayer.Dsl do
   @doc "The configured description."
   @spec description(module()) :: String.t() | nil
   def description(resource), do: get_config(resource, :description)
-
-  # --- setters (called at compile time) ------------------------------------
-
-  @doc false
-  def __set_table__(module, value), do: Module.put_attribute(module, :ash_clickhouse_table, value)
-
-  @doc false
-  def __set_repo__(module, value), do: Module.put_attribute(module, :ash_clickhouse_repo, value)
-
-  @doc false
-  def __set_database__(module, value),
-    do: Module.put_attribute(module, :ash_clickhouse_database, value)
-
-  @doc false
-  def __set_engine__(module, value), do: Module.put_attribute(module, :ash_clickhouse_engine, value)
-
-  @doc false
-  def __set_order_by__(module, value),
-    do: Module.put_attribute(module, :ash_clickhouse_order_by, value)
-
-  @doc false
-  def __set_partition_by__(module, value),
-    do: Module.put_attribute(module, :ash_clickhouse_partition_by, value)
-
-  @doc false
-  def __set_primary_key__(module, value),
-    do: Module.put_attribute(module, :ash_clickhouse_primary_key, value)
-
-  @doc false
-  def __set_settings__(module, value),
-    do: Module.put_attribute(module, :ash_clickhouse_settings, value)
-
-  @doc false
-  def __set_base_filter__(module, value),
-    do: Module.put_attribute(module, :ash_clickhouse_base_filter, value)
-
-  @doc false
-  def __set_default_context__(module, value) when is_map(value),
-    do: Module.put_attribute(module, :ash_clickhouse_default_context, value)
-
-  @doc false
-  def __set_description__(module, value) when is_binary(value),
-    do: Module.put_attribute(module, :ash_clickhouse_description, value)
-
-  @doc false
-  def __set_migrate__(module, value) when is_boolean(value),
-    do: Module.put_attribute(module, :ash_clickhouse_migrate, value)
 end

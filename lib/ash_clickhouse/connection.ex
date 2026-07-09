@@ -117,12 +117,17 @@ defmodule AshClickhouse.Connection do
 
   @doc """
   Inserts rows into a table using the client's bulk insert helper.
+
+  `statement` must be a fully-formed `INSERT INTO <table> (...) FORMAT
+  JSONCompactEachRow` query; `rows` is a list of value-lists (one per row) in the
+  same column order as the statement. Options are forwarded to the underlying
+  client (e.g. `async_insert`/`wait_for_async_insert`).
   """
-  @spec insert_rows(t() | atom(), String.t(), [map()], keyword()) ::
+  @spec insert_rows(t() | atom(), String.t(), String.t(), [list()], keyword()) ::
           {:ok, term()} | {:error, term()}
-  def insert_rows(conn_or_name, table, rows, opts \\ []) when is_list(rows) do
+  def insert_rows(conn_or_name, _table, statement, rows, opts \\ []) when is_list(rows) do
     {conn, opts} = resolve_conn(conn_or_name, opts)
-    ClickHouse.insert(conn, table, rows, opts)
+    ClickHouse.query(conn, statement, rows, opts)
   rescue
     e -> {:error, e}
   end
@@ -157,6 +162,7 @@ defmodule AshClickhouse.Connection do
     name = Keyword.get(opts, :name, __MODULE__)
     pool_timeout = Keyword.get(opts, :pool_timeout, @default_pool_timeout)
     ping_retry = Keyword.get(opts, :ping_retry, @default_ping_retry)
+    pool_size = Keyword.get(opts, :pool_size, 10)
 
     query_params = [default_format: @default_format]
     query_params = if database, do: query_params ++ [database: database], else: query_params
@@ -167,11 +173,11 @@ defmodule AshClickhouse.Connection do
       interface: ClickHouse.Interface.HTTP,
       urls: [url],
       pool_timeout: pool_timeout,
-      ping_retry: ping_retry
+      ping_retry: ping_retry,
+      pool_max_connections: pool_size
     ]
   end
 
-  defp append_query_params(url, []), do: url
   defp append_query_params(url, params) do
     separator = if String.contains?(url, "?"), do: "&", else: "?"
     "#{url}#{separator}#{URI.encode_query(params)}"

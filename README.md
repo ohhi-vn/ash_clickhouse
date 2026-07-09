@@ -16,13 +16,17 @@ ClickHouse is a full SQL columnar store, so most Ash query features map directly
 - Native aggregates (`count`, `sum`, `avg`, `min`, `max`)
 - `multitenancy` (database- or attribute-based)
 - `calculate`, `composite_primary_key`, `nested_expressions`, `boolean_filter`
-- `join`, `combine` (UNION/INTERSECT), `filter_relationship`, `exists`, `aggregate_relationship`
+- Native aggregates (`count`, `sum`, `avg`, `min`, `max`)
+- `multitenancy` (database- or attribute-based)
 
 ### Not supported
 
 - `transact` / `lock` — ClickHouse has no multi-statement transactions
 - `keyset` — ClickHouse has no token-based keyset pagination (use `offset`)
 - `upsert` — ClickHouse has no `ON CONFLICT` (use `create` + `update_query`)
+- `join` — JOINs are not yet implemented
+- `combine` (UNION/INTERSECT) — not yet implemented
+- `filter_relationship` / `exists` (unrelated) / `aggregate_relationship` — not yet implemented
 
 ## Installation
 
@@ -64,6 +68,8 @@ defmodule MyApp.User do
   use Ash.Resource,
     data_layer: AshClickhouse.DataLayer,
     domain: MyApp.Domain
+
+  import AshClickhouse.DataLayer.Dsl.Macros
 
   clickhouse do
     table "users"

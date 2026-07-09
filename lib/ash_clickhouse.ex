@@ -17,6 +17,8 @@ defmodule AshClickhouse do
           data_layer: AshClickhouse.DataLayer,
           domain: MyApp.Domain
 
+        import AshClickhouse.DataLayer.Dsl.Macros
+
         clickhouse do
           table "users"
           repo MyApp.Repo

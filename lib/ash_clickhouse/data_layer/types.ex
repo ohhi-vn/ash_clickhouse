@@ -89,7 +89,7 @@ defmodule AshClickhouse.DataLayer.Types do
   end
 
   # Fallback
-  def ash_type_to_clickhouse(_), do: "String"
+  def ash_type_to_clickhouse(_type), do: "String"
 
   @doc """
   Resolves the ClickHouse type for an Ash attribute struct, preferring the
@@ -97,11 +97,24 @@ defmodule AshClickhouse.DataLayer.Types do
   """
   @spec resolve_attr_type(map()) :: String.t()
   def resolve_attr_type(attr) do
-    if is_atom(attr.type) and function_exported?(attr.type, :storage_type, 1) do
-      ash_type_to_clickhouse(attr.type.storage_type([]))
-    else
-      ash_type_to_clickhouse(attr.type)
+    constraints = Map.get(attr, :constraints, [])
+
+    cond do
+      attr.type in [Type.Decimal, :decimal] ->
+        decimal_type(constraints)
+
+      is_atom(attr.type) and function_exported?(attr.type, :storage_type, 1) ->
+        ash_type_to_clickhouse(attr.type.storage_type(constraints))
+
+      true ->
+        ash_type_to_clickhouse(attr.type)
     end
+  end
+
+  defp decimal_type(constraints) do
+    precision = Keyword.get(constraints, :precision, 38)
+    scale = Keyword.get(constraints, :scale, 10)
+    "Decimal(#{precision}, #{scale})"
   end
 
   @doc """
@@ -121,6 +134,156 @@ defmodule AshClickhouse.DataLayer.Types do
     |> Enum.flat_map(fn attr -> [attr.name, to_string(attr.name)] end)
     |> MapSet.new()
   end
+
+  @doc """
+  Encodes an Ash attribute value into a ClickHouse-bindable value.
+
+  Most types pass through unchanged, but ClickHouse-specific encodings are
+  applied where the raw Elixir value would not bind correctly:
+
+    * `:map` / `{:map, _, _}` — keys and values stringified (ClickHouse's
+      `Map(String, String)` representation).
+    * `:array` / `:list` / `{:array, _}` — elements stringified for the
+      `Array(String)` representation.
+    * `:time` / `:time_usec` — `Time` converted to its `"HH:MM:SS"` string.
+    * `:decimal` — `Decimal` passed through (the client encodes it).
+  """
+  @spec encode_value(term(), map()) :: term()
+  def encode_value(value, attr) when is_map(attr) do
+    case attr.type do
+      Type.Map -> encode_map(value)
+      :map -> encode_map(value)
+      {:map, _, _} -> encode_map(value)
+      Type.Time -> encode_time(value)
+      :time -> encode_time(value)
+      :time_usec -> encode_time(value)
+      Type.Array -> encode_list(value)
+      :array -> encode_list(value)
+      :list -> encode_list(value)
+      {:array, _} -> encode_list(value)
+      _ -> value
+    end
+  end
+
+  def encode_value(value, _attr), do: value
+
+  defp encode_map(nil), do: nil
+
+  defp encode_map(map) when is_map(map) do
+    map
+    |> Enum.map(fn {k, v} -> {to_string(k), to_string(v)} end)
+    |> Map.new()
+  end
+
+  defp encode_map(other), do: other
+
+  defp encode_list(nil), do: nil
+
+  defp encode_list(list) when is_list(list) do
+    Enum.map(list, &to_string/1)
+  end
+
+  defp encode_list(other), do: other
+
+  defp encode_time(%Time{} = time), do: Time.to_string(time)
+  defp encode_time(other), do: other
+
+  @doc """
+  Decodes a raw ClickHouse value back into its Ash attribute value.
+
+  Mirrors `encode_value/2`: stringified maps/lists are left as-is (the
+  ClickHouse client already returns them in the expected shape for the
+  `Map(String, String)` / `Array(String)` column types), and time strings
+  are parsed back into `Time` structs.
+  """
+  @spec decode_value(term(), map()) :: term()
+  def decode_value(value, attr) when is_map(attr) do
+    case attr.type do
+      Type.Time -> decode_time(value)
+      :time -> decode_time(value)
+      :time_usec -> decode_time(value)
+      Type.Integer -> decode_integer(value)
+      :integer -> decode_integer(value)
+      Type.Float -> decode_float(value)
+      :float -> decode_float(value)
+      :double -> decode_float(value)
+      Type.Boolean -> decode_boolean(value)
+      :boolean -> decode_boolean(value)
+      Type.Decimal -> decode_decimal(value)
+      :decimal -> decode_decimal(value)
+      _ -> value
+    end
+  end
+
+  def decode_value(value, _attr), do: value
+
+  defp decode_integer(nil), do: nil
+  defp decode_integer(value) when is_integer(value), do: value
+
+  defp decode_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} -> int
+      {int, _} -> int
+      _ -> value
+    end
+  end
+
+  defp decode_integer(value), do: value
+
+  defp decode_float(nil), do: nil
+  defp decode_float(value) when is_float(value), do: value
+  defp decode_float(value) when is_integer(value), do: value * 1.0
+
+  defp decode_float(value) when is_binary(value) do
+    case Float.parse(value) do
+      {float, ""} -> float
+      {float, _} -> float
+      _ -> value
+    end
+  end
+
+  defp decode_float(value), do: value
+
+  defp decode_boolean(nil), do: nil
+  defp decode_boolean(value) when is_boolean(value), do: value
+  defp decode_boolean(1), do: true
+  defp decode_boolean(0), do: false
+
+  defp decode_boolean(value) when is_binary(value) do
+    case String.downcase(value) do
+      "true" -> true
+      "1" -> true
+      "false" -> false
+      "0" -> false
+      _ -> value
+    end
+  end
+
+  defp decode_boolean(value), do: value
+
+  defp decode_decimal(nil), do: nil
+  defp decode_decimal(%Decimal{} = value), do: value
+
+  defp decode_decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {dec, ""} -> dec
+      {dec, _} -> dec
+      _ -> value
+    end
+  end
+
+  defp decode_decimal(value), do: value
+
+  defp decode_time(nil), do: nil
+
+  defp decode_time(str) when is_binary(str) do
+    case Time.from_iso8601(str) do
+      {:ok, time} -> time
+      _ -> str
+    end
+  end
+
+  defp decode_time(other), do: other
 
   @doc """
   Returns the set of attribute names (atom) that are Atom-typed.

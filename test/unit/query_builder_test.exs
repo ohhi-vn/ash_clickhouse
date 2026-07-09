@@ -6,7 +6,23 @@ defmodule AshClickhouse.QueryBuilderTest do
   alias AshClickhouse.Query
 
   defp query(overrides) do
-    struct!(Query, Map.merge(%{table: "users", database: nil, filters: [], sorts: [], limit: nil, offset: nil, select: nil, distinct: nil, group_by: nil}, overrides))
+    struct!(
+      Query,
+      Map.merge(
+        %{
+          table: "users",
+          database: nil,
+          filters: [],
+          sorts: [],
+          limit: nil,
+          offset: nil,
+          select: nil,
+          distinct: nil,
+          group_by: nil
+        },
+        overrides
+      )
+    )
   end
 
   describe "build_optimized_query/1" do
@@ -36,7 +52,14 @@ defmodule AshClickhouse.QueryBuilderTest do
 
       {sql, params} =
         QueryBuilder.build_optimized_query(
-          query(%{database: "app", filters: [filter], sorts: [{:name, :asc}], limit: 10, offset: 5, select: [:id, :name]})
+          query(%{
+            database: "app",
+            filters: [filter],
+            sorts: [{:name, :asc}],
+            limit: 10,
+            offset: 5,
+            select: [:id, :name]
+          })
         )
 
       assert sql ==
@@ -67,7 +90,7 @@ defmodule AshClickhouse.QueryBuilderTest do
         QueryBuilder.build_where_clause([%{op: :and, left: left, right: right}])
 
       assert sql == " WHERE (`a` = ? AND `b` = ?)"
-      assert params == [2, 1]
+      assert params == [1, 2]
     end
 
     test "is_nil" do
