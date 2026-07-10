@@ -70,6 +70,30 @@ defmodule AshClickhouse.QueryBuilderExtraTest do
       assert params == ["a", "b"]
     end
 
+    test "in with a MapSet expands to placeholders (Ash membership values)" do
+      filter = %{
+        operator: :in,
+        left: %{name: :status},
+        right: %{value: MapSet.new(["a", "b", "c"])}
+      }
+
+      {sql, params} = QueryBuilder.build_where_clause([filter])
+      assert sql == " WHERE `status` IN (?, ?, ?)"
+      assert MapSet.new(params) == MapSet.new(["a", "b", "c"])
+    end
+
+    test "not_in with a MapSet expands to placeholders" do
+      filter = %{
+        operator: :not_in,
+        left: %{name: :status},
+        right: %{value: MapSet.new(["a", "b"])}
+      }
+
+      {sql, params} = QueryBuilder.build_where_clause([filter])
+      assert sql == " WHERE `status` NOT IN (?, ?)"
+      assert MapSet.new(params) == MapSet.new(["a", "b"])
+    end
+
     test "contains maps to positionCaseInsensitive" do
       filter = %{operator: :contains, left: %{name: :name}, right: %{value: "oh"}}
       {sql, params} = QueryBuilder.build_where_clause([filter])

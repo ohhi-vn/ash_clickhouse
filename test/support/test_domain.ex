@@ -4,5 +4,7 @@ defmodule AshClickhouse.TestDomain do
 
   resources do
     resource(AshClickhouse.TestResource)
+    resource(AshClickhouse.TestPartitionedResource)
+    resource(AshClickhouse.TestBulkResource)
   end
 end

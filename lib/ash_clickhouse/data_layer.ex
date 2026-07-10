@@ -207,6 +207,9 @@ defmodule AshClickhouse.DataLayer do
     params = convert_uuid_params(params, resource)
     opts = build_query_opts(resource)
 
+    # NOTE: debug logging includes the full SQL and bound parameters, which may
+    # contain row data. Do not enable `:debug` for this module in production
+    # unless you are comfortable with that data appearing in logs.
     Logger.debug("AshClickhouse: #{query} #{inspect(params)}")
 
     result =
@@ -247,6 +250,11 @@ defmodule AshClickhouse.DataLayer do
   This is the natural read path for large OLAP scans/reports. The returned
   stream yields decoded Ash records one at a time as chunks arrive.
 
+  In-memory calculations and aggregates configured on the query are applied to
+  each decoded chunk, so `stream/3` returns results identical to `run_query/2`
+  (which applies them after fetching all rows). This keeps streaming and
+  non-streaming reads behaviourally consistent.
+
   ## Options
 
   - `:mutations_sync` is ignored for reads.
@@ -254,7 +262,7 @@ defmodule AshClickhouse.DataLayer do
   """
   @spec stream(t(), Ash.Resource.t(), keyword()) :: Enumerable.t(Ash.Resource.t())
   def stream(data_layer_query, resource, opts \\ []) do
-    %Query{repo: repo} = data_layer_query
+    %Query{repo: repo, context: context} = data_layer_query
 
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
     params = convert_uuid_params(params, resource)
@@ -262,11 +270,39 @@ defmodule AshClickhouse.DataLayer do
 
     repo = if is_nil(repo), do: repo(resource), else: repo
 
+    # Apply the same default format used by `Connection.query` so ClickHouse
+    # returns `JSONCompactEachRow` (one JSON array per row). Without this, the
+    # stream would receive ClickHouse's default format (JSON objects) and
+    # `JSONCompactEachRow.decode/1` would fail to parse it.
+    opts = AshClickhouse.Connection.with_default_format(opts)
+
+    # Thread the configured database into the client opts so the `clickhouse`
+    # client appends it as `?database=...` (it is no longer baked into the
+    # connection URL). Without this, streaming would target the default
+    # database instead of the resource's database.
+    opts =
+      if Keyword.has_key?(opts, :database) do
+        opts
+      else
+        database = AshClickhouse.Connection.database_for(repo)
+        if database, do: [{:database, database} | opts], else: opts
+      end
+
+    aggregates = Map.get(context, :aggregates, [])
+
     stream = ClickHouse.stream!(repo, query, params, opts)
 
     Stream.map(stream, fn chunk ->
       {_columns, rows} = ClickHouse.Format.JSONCompactEachRow.decode(chunk)
-      Enum.map(rows, &to_ash_record(&1, resource))
+
+      records = Enum.map(rows, &to_ash_record(&1, resource))
+
+      # Mirror `run_query/2`: apply in-memory calculations and attach aggregates
+      # so streaming and non-streaming reads return identical results.
+      records = apply_calculations(records, context)
+      records = attach_aggregates(records, aggregates, resource, repo, opts)
+
+      records
     end)
     |> Stream.flat_map(& &1)
   end
@@ -447,7 +483,11 @@ defmodule AshClickhouse.DataLayer do
       ])
 
     with {:ok, _} <-
-           repo.query(query, set_values ++ where_params, build_opts(resource, changeset.context, 1)) do
+           repo.query(
+             query,
+             set_values ++ where_params,
+             build_opts(resource, changeset.context, 1)
+           ) do
       run_query(data_layer_query, resource)
     end
   end
@@ -488,6 +528,11 @@ defmodule AshClickhouse.DataLayer do
   @spec lock(t(), term(), Ash.Resource.t()) :: {:ok, t()}
   def lock(data_layer_query, _lock_type, _resource), do: {:ok, data_layer_query}
 
+  # Combination queries (UNION/INTERSECT) are executed by Ash as separate
+  # queries and combined in memory, so Ash never invokes this callback for the
+  # ClickHouse data layer. `can?/2` reports `{:combine, _}` as unsupported.
+  # This clause is defensive/unreachable and exists only to satisfy the
+  # `Ash.DataLayer` behaviour.
   @impl Ash.DataLayer
   @spec combination_of(t(), term(), Ash.Resource.t()) :: {:ok, t()} | {:error, term()}
   def combination_of(_data_layer_query, _combination, _resource) do
@@ -590,17 +635,7 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec source(Ash.Resource.t()) :: String.t()
   def source(resource) do
-    case Process.get({__MODULE__, :source, resource}) do
-      nil ->
-        resolved = resolve_table_name(resource)
-        Process.put({__MODULE__, :source, resource}, resolved)
-        resolved
-
-      cached ->
-        cached
-    end
-  rescue
-    _ -> resolve_table_name(resource)
+    resolve_table_name(resource)
   end
 
   @doc false
@@ -682,7 +717,11 @@ defmodule AshClickhouse.DataLayer do
   defp ensure_repo_cache do
     case :ets.whereis(:ash_clickhouse_repo_cache) do
       :undefined ->
-        :ets.new(:ash_clickhouse_repo_cache, [:named_table, :public, {:read_concurrency, true}])
+        try do
+          :ets.new(:ash_clickhouse_repo_cache, [:named_table, :public, {:read_concurrency, true}])
+        rescue
+          ArgumentError -> :ok
+        end
 
       _ ->
         :ok
@@ -790,9 +829,9 @@ defmodule AshClickhouse.DataLayer do
     {query, []}
   end
 
-  defp build_aggregate_query(%{kind: kind, field: field}, table, where_clause)
+  defp build_aggregate_query(%{kind: kind, field: field} = aggregate, table, where_clause)
        when kind in [:sum, :avg, :min, :max] do
-    cql_field = resolve_aggregate_field(field, aggregate_resource(nil))
+    cql_field = resolve_aggregate_field(field, aggregate.resource)
     query = "SELECT #{String.upcase(to_string(kind))}(#{cql_field}) FROM #{table}#{where_clause}"
     {query, []}
   end
@@ -800,8 +839,6 @@ defmodule AshClickhouse.DataLayer do
   defp build_aggregate_query(%{kind: kind}, _table, _where_clause) do
     {:error, "Aggregate kind #{kind} is not supported by ClickHouse data layer"}
   end
-
-  defp aggregate_resource(_), do: nil
 
   defp resolve_aggregate_field(nil, _resource), do: "*"
 
@@ -1014,19 +1051,24 @@ defmodule AshClickhouse.DataLayer do
   end
 
   defp convert_uuid_params(params, _resource) do
-    Enum.map(params, fn
-      value when is_binary(value) and byte_size(value) == 36 ->
-        if Types.uuid_like_string?(value) do
-          case Types.uuid_string_to_binary(value) do
-            {:ok, bin} -> bin
-            _ -> value
-          end
-        else
-          value
-        end
+    Enum.flat_map(params, fn value ->
+      cond do
+        is_struct(value, MapSet) ->
+          MapSet.to_list(value)
 
-      value ->
-        value
+        is_binary(value) and byte_size(value) == 36 ->
+          if Types.uuid_like_string?(value) do
+            case Types.uuid_string_to_binary(value) do
+              {:ok, bin} -> [bin]
+              _ -> [value]
+            end
+          else
+            [value]
+          end
+
+        true ->
+          [value]
+      end
     end)
   end
 
@@ -1131,6 +1173,15 @@ defmodule AshClickhouse.DataLayer do
   # insert, ClickHouse's JSONCompactEachRow expects native JSON values, so we
   # keep UUIDs as their canonical string form and leave maps/arrays as Elixir
   # maps/lists (Jason serializes them directly).
+  #
+  # Decimal structs are not natively understood by Jason, so we render them as a
+  # numeric string. ClickHouse parses the JSON number on insert, so the value is
+  # stored with full precision. If your JSON encoder has a native Decimal
+  # implementation you may remove this branch.
+  defp encode_bulk_value(%Decimal{} = value, _name, _resource) do
+    Decimal.to_string(value, :normal)
+  end
+
   defp encode_bulk_value(value, name, resource) do
     uuid_fields = Types.uuid_attribute_names(resource)
 
@@ -1171,7 +1222,8 @@ defmodule AshClickhouse.DataLayer do
     to_ash_record(row, resource, [])
   end
 
-  defp to_ash_record(row, resource, columns) when is_list(row) and is_list(columns) and columns != [] do
+  defp to_ash_record(row, resource, columns)
+       when is_list(row) and is_list(columns) and columns != [] do
     record_map =
       row
       |> Enum.zip(columns)
@@ -1244,7 +1296,8 @@ defmodule AshClickhouse.DataLayer do
     from_context =
       Map.get(context, :mutations_sync) || Map.get(context, :private, %{})[:mutations_sync]
 
-    sync = if from_context != nil, do: from_context, else: Dsl.mutations_sync(resource) || default_sync
+    sync =
+      if from_context != nil, do: from_context, else: Dsl.mutations_sync(resource) || default_sync
 
     if sync != nil do
       [settings: %{mutations_sync: sync}]

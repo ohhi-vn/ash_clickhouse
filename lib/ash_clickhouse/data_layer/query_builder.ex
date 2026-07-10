@@ -10,6 +10,23 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
   alias AshClickhouse.Identifier
   alias AshClickhouse.Query
 
+  require Logger
+
+  # Escape character used when quoting `%`/`_` wildcards inside LIKE patterns
+  # (see `escape_like/1`). Chosen as a backslash because it is unlikely to
+  # appear in real search input and is a valid ClickHouse LIKE escape char.
+  @like_escape "\\"
+
+  # When `true`, an untranslatable filter raises instead of being silently
+  # dropped. Configure via `config :ash_clickhouse, :raise_on_untranslatable_filter, true`.
+  #
+  # Defaults to `false`, in which case a warning is logged and the filter is
+  # dropped (current historical behaviour, kept for backwards compatibility).
+  @spec raise_on_untranslatable?() :: boolean()
+  defp raise_on_untranslatable? do
+    Application.get_env(:ash_clickhouse, :raise_on_untranslatable_filter, false)
+  end
+
   @doc """
   Builds the final SELECT query and parameter list.
   """
@@ -93,7 +110,7 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
   def build_where_clause(filters) when is_list(filters) do
     {parts, params} =
       Enum.reduce(filters, {[], []}, fn filter, {parts_acc, params_acc} ->
-        case build_predicate(filter) do
+        case translate_predicate(filter) do
           {sql, new_params} -> {[sql | parts_acc], params_acc ++ new_params}
           nil -> {parts_acc, params_acc}
         end
@@ -114,11 +131,11 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
       {{l_sql, l_p}, {r_sql, r_p}} ->
         {"(#{l_sql} AND #{r_sql})", l_p ++ r_p}
 
-      {pred, nil} ->
-        pred
-
-      {nil, pred} ->
-        pred
+      # A child that cannot be translated makes the whole conjunction
+      # untranslatable. Returning `nil` lets the top-level `translate_predicate`
+      # warn/raise instead of silently dropping part of the filter.
+      _ ->
+        nil
     end
   end
 
@@ -127,11 +144,8 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
       {{l_sql, l_p}, {r_sql, r_p}} ->
         {"(#{l_sql} OR #{r_sql})", l_p ++ r_p}
 
-      {pred, nil} ->
-        pred
-
-      {nil, pred} ->
-        pred
+      _ ->
+        nil
     end
   end
 
@@ -178,6 +192,35 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
 
   defp build_predicate(_), do: nil
 
+  # Translates a single filter, logging a warning (or raising, when
+  # `:raise_on_untranslatable_filter` is enabled) when the filter cannot be
+  # expressed in SQL. A silently-dropped filter would produce a *less*
+  # restrictive query (e.g. for `base_filter` or tenant scoping) and can leak
+  # rows, so we surface it instead of ignoring it.
+  @spec translate_predicate(term()) :: {String.t(), list()} | nil
+  defp translate_predicate(filter) do
+    case build_predicate(filter) do
+      nil ->
+        handle_untranslatable_filter(filter)
+        nil
+
+      other ->
+        other
+    end
+  end
+
+  defp handle_untranslatable_filter(filter) do
+    message =
+      "AshClickhouse: dropping untranslatable filter #{inspect(filter)}. " <>
+        "This makes the query less restrictive than intended."
+
+    if raise_on_untranslatable?() do
+      raise AshClickhouse.Error.QueryError, message
+    else
+      Logger.warning(message)
+    end
+  end
+
   defp ref_name(%Ash.Query.Ref{attribute: %{name: name}}), do: name
   defp ref_name(%Ash.Query.Ref{attribute: name}), do: name
   defp ref_name(name) when is_atom(name), do: name
@@ -214,18 +257,32 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
     {Identifier.quote_name(name) <> " <= ?", [value]}
   end
 
-  defp build_comparison(:in, name, value) when (is_atom(name) or is_binary(name)) and is_list(value) do
+  defp build_comparison(:in, name, value)
+       when (is_atom(name) or is_binary(name)) and is_list(value) do
     placeholders = Enum.map_join(value, ", ", fn _ -> "?" end)
     {"#{Identifier.quote_name(name)} IN (#{placeholders})", value}
   end
 
   defp build_comparison(:in, name, value) when is_atom(name) or is_binary(name) do
-    {Identifier.quote_name(name) <> " IN (?)", [value]}
+    if is_struct(value, MapSet) do
+      build_comparison(:in, name, MapSet.to_list(value))
+    else
+      {Identifier.quote_name(name) <> " IN (?)", [value]}
+    end
   end
 
-  defp build_comparison(:not_in, name, value) when (is_atom(name) or is_binary(name)) and is_list(value) do
+  defp build_comparison(:not_in, name, value)
+       when (is_atom(name) or is_binary(name)) and is_list(value) do
     placeholders = Enum.map_join(value, ", ", fn _ -> "?" end)
     {"#{Identifier.quote_name(name)} NOT IN (#{placeholders})", value}
+  end
+
+  defp build_comparison(:not_in, name, value) when is_atom(name) or is_binary(name) do
+    if is_struct(value, MapSet) do
+      build_comparison(:not_in, name, MapSet.to_list(value))
+    else
+      {Identifier.quote_name(name) <> " NOT IN (?)", [value]}
+    end
   end
 
   defp build_comparison(:is_nil, name, true) when is_atom(name) or is_binary(name) do
@@ -237,15 +294,21 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
   end
 
   defp build_comparison(:contains, name, value) when is_atom(name) or is_binary(name) do
+    # `positionCaseInsensitive` is a case-insensitive substring search, so `%`
+    # and `_` in the value are treated literally (no LIKE-wildcard injection).
+    # Note this is intentionally case-*insensitive*, unlike `starts_with`/
+    # `ends_with` below which use case-sensitive `LIKE`.
     {"positionCaseInsensitive(#{Identifier.quote_name(name)}, ?) > 0", [to_string(value)]}
   end
 
   defp build_comparison(:starts_with, name, value) when is_atom(name) or is_binary(name) do
-    {"#{Identifier.quote_name(name)} LIKE ?", [to_string(value) <> "%"]}
+    escaped = escape_like(value)
+    {"#{Identifier.quote_name(name)} LIKE ? ESCAPE '#{@like_escape}'", [escaped <> "%"]}
   end
 
   defp build_comparison(:ends_with, name, value) when is_atom(name) or is_binary(name) do
-    {"#{Identifier.quote_name(name)} LIKE ?", ["%" <> to_string(value)]}
+    escaped = escape_like(value)
+    {"#{Identifier.quote_name(name)} LIKE ? ESCAPE '#{@like_escape}'", ["%" <> escaped]}
   end
 
   defp build_comparison(_operator, _left, _right), do: nil
@@ -302,6 +365,27 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
   def cql_identifier(name), do: Identifier.quote_name(name)
 
   defp truncate_integer(value) when is_integer(value), do: value
-  defp truncate_integer(value) when is_binary(value), do: value
-  defp truncate_integer(value), do: value
+
+  defp truncate_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} -> int
+      _ -> raise ArgumentError, "limit/offset must be an integer, got: #{inspect(value)}"
+    end
+  end
+
+  defp truncate_integer(value) do
+    raise ArgumentError, "limit/offset must be an integer, got: #{inspect(value)}"
+  end
+
+  # Escapes ClickHouse `LIKE` wildcards (`%` and `_`) as well as the escape
+  # character itself, so a literal value such as `"50% off"` matches only that
+  # exact substring rather than any row containing `50` followed by anything.
+  @spec escape_like(term()) :: String.t()
+  defp escape_like(value) do
+    value
+    |> to_string()
+    |> String.replace(@like_escape, @like_escape <> @like_escape)
+    |> String.replace("%", @like_escape <> "%")
+    |> String.replace("_", @like_escape <> "_")
+  end
 end

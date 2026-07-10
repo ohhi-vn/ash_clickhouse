@@ -4,7 +4,7 @@ defmodule AshClickhouse.MixProject do
   def project do
     [
       app: :ash_clickhouse,
-      version: "0.2.0",
+      version: "0.3.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -63,7 +63,29 @@ defmodule AshClickhouse.MixProject do
       main: "AshClickhouse",
       extras: [
         "README.md",
-        "CHANGELOG.md"
+        "CHANGELOG.md",
+        "guides/getting-started.md",
+        "guides/resources.md",
+        "guides/configuration.md",
+        "guides/migrations.md",
+        "guides/querying.md",
+        "guides/multitenancy.md",
+        "guides/types.md",
+        "guides/telemetry.md",
+        "guides/limitations.md"
+      ],
+      groups_for_extras: [
+        Guides: [
+          "guides/getting-started.md",
+          "guides/resources.md",
+          "guides/configuration.md",
+          "guides/migrations.md",
+          "guides/querying.md",
+          "guides/multitenancy.md",
+          "guides/types.md",
+          "guides/telemetry.md",
+          "guides/limitations.md"
+        ]
       ],
       groups_for_modules: [
         Core: [

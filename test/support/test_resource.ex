@@ -14,6 +14,7 @@ defmodule AshClickhouse.TestResource do
     database("ash_clickhouse_test")
     engine("MergeTree()")
     order_by("id")
+    mutations_sync(1)
   end
 
   attributes do

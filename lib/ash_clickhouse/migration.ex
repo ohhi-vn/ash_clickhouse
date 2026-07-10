@@ -127,8 +127,32 @@ defmodule AshClickhouse.Migration do
     case Types.resolve_attr_type(attr) do
       "String" -> "'#{escape_default(value)}'"
       "UUID" -> "'#{escape_default(value)}'"
-      _ -> to_string(value)
+      type -> inspect_numeric_default(value, type)
     end
+  end
+
+  # Numeric/other column types expect a bare literal (e.g. `42`, `1.5`). A
+  # developer-authored default that is not a number would otherwise be passed
+  # through `to_string/1` unescaped and could corrupt the generated DDL, so we
+  # validate it is numeric before emitting it.
+  defp inspect_numeric_default(value, _type) when is_integer(value), do: to_string(value)
+  defp inspect_numeric_default(value, _type) when is_float(value), do: to_string(value)
+
+  defp inspect_numeric_default(value, type) when is_binary(value) do
+    case Float.parse(value) do
+      {_num, ""} -> value
+      _ -> raise AshClickhouse.Error.ConfigurationError, """
+      Non-numeric default #{inspect(value)} is not valid for column type #{type}.
+      Defaults for numeric columns must be numbers.
+      """
+    end
+  end
+
+  defp inspect_numeric_default(value, type) do
+    raise AshClickhouse.Error.ConfigurationError, """
+    Non-numeric default #{inspect(value)} is not valid for column type #{type}.
+    Defaults for numeric columns must be numbers.
+    """
   end
 
   # Escape embedded quotes/backslashes in developer-supplied default literals
