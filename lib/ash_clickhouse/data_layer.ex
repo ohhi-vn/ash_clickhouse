@@ -43,6 +43,17 @@ defmodule AshClickhouse.DataLayer do
   - `{:query_aggregate, :count | :sum | :avg | :min | :max}`
   - Combination queries (UNION/INTERSECT) — executed by Ash in memory
 
+  ## Relationship aggregates
+
+  `attach_aggregates/5` supports `{:aggregate, :count | :sum | :avg | :min | :max}`
+  over `belongs_to`, `has_many`, and `has_one` relationships. A `belongs_to`
+  aggregate is a *lookup* of the related row's scalar field (e.g.
+  `customer.tier`), not a true aggregation across multiple rows — ClickHouse's
+  lack of JOINs makes this distinction more visible than in a Postgres-backed
+  data layer. `has_many`/`has_one` aggregates are real grouped aggregations
+  (e.g. "count of orders per customer"). Multi-hop relationship paths are not
+  supported and fall back to each aggregate's `default_value`.
+
   ## Features NOT Supported
 
   - `:transact` — ClickHouse has no multi-statement transactions
@@ -69,6 +80,7 @@ defmodule AshClickhouse.DataLayer do
   alias AshClickhouse.Identifier
   alias AshClickhouse.Query
   alias AshClickhouse.Telemetry
+  alias ClickHouse.Format
 
   @default_batch_size 1000
   @max_batch_size 100_000
@@ -204,7 +216,6 @@ defmodule AshClickhouse.DataLayer do
     %Query{repo: repo} = data_layer_query
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
 
-    params = convert_uuid_params(params, resource)
     opts = build_query_opts(resource)
 
     # NOTE: debug logging includes the full SQL and bound parameters, which may
@@ -265,7 +276,6 @@ defmodule AshClickhouse.DataLayer do
     %Query{repo: repo, context: context} = data_layer_query
 
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
-    params = convert_uuid_params(params, resource)
     opts = build_query_opts(resource) ++ opts
 
     repo = if is_nil(repo), do: repo(resource), else: repo
@@ -293,7 +303,7 @@ defmodule AshClickhouse.DataLayer do
     stream = ClickHouse.stream!(repo, query, params, opts)
 
     Stream.map(stream, fn chunk ->
-      {_columns, rows} = ClickHouse.Format.JSONCompactEachRow.decode(chunk)
+      {_columns, rows} = Format.JSONCompactEachRow.decode(chunk)
 
       records = Enum.map(rows, &to_ash_record(&1, resource))
 
@@ -593,7 +603,12 @@ defmodule AshClickhouse.DataLayer do
 
     case repo.query(query, params, opts) do
       {:ok, %ClickHouse.Result{rows: [[value]]}} ->
-        {:cont, Map.put(acc, aggregate.name, decode_aggregate(value, aggregate.kind))}
+        {:cont,
+         Map.put(
+           acc,
+           aggregate.name,
+           decode_aggregate(value, aggregate.kind, aggregate.field, resource)
+         )}
 
       {:ok, %ClickHouse.Result{rows: []}} ->
         {:cont, Map.put(acc, aggregate.name, Map.get(aggregate, :default_value))}
@@ -603,20 +618,37 @@ defmodule AshClickhouse.DataLayer do
     end
   end
 
-  # ClickHouse returns aggregate results as strings; decode them to the
-  # appropriate Elixir numeric type so callers get `10` rather than `"10"`.
-  defp decode_aggregate(value, :count), do: Types.decode_value(value, %{type: :integer})
+  # ClickHouse returns aggregate results as strings. Decode them to the
+  # appropriate Elixir numeric type using the *actual* Ash attribute type of the
+  # aggregated field rather than guessing from the string's shape (the old
+  # `String.contains?(value, ".")` sniffing mishandled scientific notation and
+  # silently downgraded `Decimal` columns to `float`, losing precision).
+  defp decode_aggregate(value, :count, _field, _resource) do
+    Types.decode_value(value, %{type: :integer})
+  end
 
-  defp decode_aggregate(value, kind) when kind in [:sum, :min, :max] do
-    if is_binary(value) and String.contains?(value, ".") do
-      Types.decode_value(value, %{type: :float})
-    else
-      Types.decode_value(value, %{type: :integer})
+  defp decode_aggregate(value, kind, field, resource) when kind in [:sum, :min, :max, :avg] do
+    case resolve_field_attr(field, resource) do
+      %{} = attr when kind != :avg ->
+        Types.decode_value(value, attr)
+
+      _ ->
+        # `:avg` always returns a fractional result regardless of source column
+        # type; fall back to float when the field type is unknown.
+        Types.decode_value(value, %{type: :float})
     end
   end
 
-  defp decode_aggregate(value, :avg), do: Types.decode_value(value, %{type: :float})
-  defp decode_aggregate(value, _kind), do: value
+  defp decode_aggregate(value, _kind, _field, _resource), do: value
+
+  defp resolve_field_attr(nil, _resource), do: nil
+  defp resolve_field_attr(%{name: name}, resource), do: resolve_field_attr(name, resource)
+
+  defp resolve_field_attr(field, resource) when is_atom(field) do
+    Enum.find(Info.attributes(resource), &(&1.name == field))
+  end
+
+  defp resolve_field_attr(_field, _resource), do: nil
 
   @impl Ash.DataLayer
   @spec calculate(t(), Ash.Query.Calculation.t(), Ash.Resource.t()) :: {:ok, t()}
@@ -646,38 +678,37 @@ defmodule AshClickhouse.DataLayer do
         segments = Module.split(resource)
 
         name =
-          if Info.domain(resource) do
-            segments
-            |> Enum.take(-2)
-            |> Enum.map(&Macro.underscore/1)
-            |> Enum.join("_")
-          else
-            segments
-            |> List.last()
-            |> Macro.underscore()
+          case safe_domain(resource) do
+            nil ->
+              segments
+              |> List.last()
+              |> Macro.underscore()
+
+            _domain ->
+              segments
+              |> Enum.take(-2)
+              |> Enum.map_join("_", &Macro.underscore/1)
           end
 
-        table_attr =
-          try do
-            Module.get_attribute(resource, :table)
-          rescue
-            ArgumentError -> nil
-          end
+        Identifier.sanitize!(name)
 
-        case table_attr do
-          nil -> name
-          "" -> name
-          table -> to_string(table)
-        end
-
-      dsl_table ->
-        to_string(dsl_table)
+      table ->
+        Identifier.sanitize!(to_string(table))
     end
-    |> Identifier.sanitize!()
+  end
+
+  # `Ash.Resource.Info.domain/1` can raise (e.g. "not a Spark DSL module")
+  # for resources whose domain isn't persisted as a DSL field. Guard it so a
+  # missing domain degrades gracefully to the module-name-derived default
+  # table name instead of crashing source/table resolution.
+  defp safe_domain(resource) do
+    Info.domain(resource)
+  rescue
+    _ -> nil
   end
 
   @spec repo(module()) :: module()
-  defp repo(resource) do
+  def repo(resource) do
     ensure_repo_cache()
 
     case :ets.lookup(:ash_clickhouse_repo_cache, resource) do
@@ -685,14 +716,7 @@ defmodule AshClickhouse.DataLayer do
         repo
 
       [] ->
-        repo =
-          try do
-            Module.get_attribute(resource, :repo)
-          rescue
-            ArgumentError -> nil
-          end
-
-        repo = if is_nil(repo), do: Dsl.repo(resource), else: repo
+        repo = Dsl.repo(resource)
 
         if is_nil(repo) do
           raise AshClickhouse.Error.ConfigurationError, """
@@ -712,6 +736,20 @@ defmodule AshClickhouse.DataLayer do
           repo
         end
     end
+  end
+
+  @doc """
+  Clears the resource → repo ETS cache.
+
+  The cache is populated lazily and lives for the life of the VM, which is
+  correct for long-running production apps but painful for test suites that
+  redefine resources or repo configuration between tests. Call this from
+  `setup`/`on_exit` in those tests to force re-resolution.
+  """
+  @spec clear_repo_cache!() :: :ok
+  def clear_repo_cache! do
+    :ets.delete_all_objects(:ash_clickhouse_repo_cache)
+    :ok
   end
 
   defp ensure_repo_cache do
@@ -857,91 +895,243 @@ defmodule AshClickhouse.DataLayer do
 
   defp attach_aggregates(records, _aggregates, _resource, nil, _opts), do: records
 
+  # One batched lookup per aggregate instead of one query per (record,
+  # aggregate) pair. Each aggregate is computed once across the whole result set
+  # with a single grouped query, then the results are merged back into the
+  # records in memory. This turns an N×M round-trip pattern (N rows × M
+  # aggregates) into M round-trips regardless of page size.
   defp attach_aggregates(records, aggregates, resource, repo, opts) do
     pkey = Info.primary_key(resource)
 
+    aggregate_maps =
+      Map.new(aggregates, fn aggregate ->
+        {aggregate.name, batched_aggregate_values(aggregate, records, pkey, resource, repo, opts)}
+      end)
+
     Enum.map(records, fn record ->
-      pk_values = Map.take(record, pkey)
+      pk_key = pk_lookup_key(record, pkey)
 
       agg_values =
-        Enum.reduce(aggregates, %{}, fn aggregate, acc ->
-          case compute_record_aggregate(aggregate, pk_values, resource, repo, opts) do
-            {:ok, value} -> Map.put(acc, aggregate.name, value)
-            :error -> Map.put(acc, aggregate.name, aggregate.default_value)
-          end
+        Map.new(aggregates, fn aggregate ->
+          values = Map.fetch!(aggregate_maps, aggregate.name)
+          value = Map.get(values, pk_key, aggregate.default_value)
+          {aggregate.name, value}
         end)
 
       Map.update!(record, :aggregates, &Map.merge(&1, agg_values))
     end)
   end
 
-  defp compute_record_aggregate(aggregate, pk_values, resource, repo, opts) do
-    %{kind: kind, field: field, relationship_path: path} = aggregate
+  defp pk_lookup_key(record, pkey) do
+    pkey
+    |> Enum.map(&Map.get(record, &1))
+    |> case do
+      [single] -> single
+      multi -> List.to_tuple(multi)
+    end
+  end
 
-    if path == [] do
-      compute_same_table_aggregate(kind, field, resource, repo, opts, pk_values)
+  # Returns `%{pk_value_or_tuple => decoded_aggregate_value}` for every record's
+  # owning key, computed with a single grouped query instead of N individual
+  # ones.
+  defp batched_aggregate_values(aggregate, records, pkey, resource, repo, opts) do
+    %{kind: kind, field: field, relationship_path: path, default_value: default_value} = aggregate
+
+    case path do
+      [] ->
+        batched_same_table_aggregate(kind, field, pkey, records, resource, repo, opts)
+
+      [rel_name] ->
+        batched_related_aggregate(
+          kind,
+          field,
+          rel_name,
+          pkey,
+          records,
+          resource,
+          repo,
+          opts,
+          default_value
+        )
+
+      _ ->
+        # Multi-hop relationship aggregates are not supported; fall back to each
+        # aggregate's `default_value`.
+        %{}
+    end
+  end
+
+  # Aggregating a field on the same row as the record itself — batch as a single
+  # SELECT ... WHERE pk IN (...), keyed by pk.
+  defp batched_same_table_aggregate(kind, field, pkey, records, resource, repo, opts) do
+    if length(pkey) != 1 do
+      %{}
     else
-      compute_related_table_aggregate(kind, field, path, resource, repo, opts, pk_values)
+      [pk_col] = pkey
+      pk_values = Enum.map(records, &Map.get(&1, pk_col)) |> Enum.uniq()
+      table = qualified_table(resource)
+      cql_field = aggregate_field_to_cql(kind, field, resource)
+
+      {in_clause, in_params} = build_in_clause(pk_col, pk_values, resource)
+
+      query =
+        "SELECT #{Identifier.quote_name(pk_col)}, #{cql_field} FROM #{table} WHERE #{in_clause}"
+
+      case repo.query(query, in_params, opts) do
+        {:ok, %ClickHouse.Result{rows: rows}} ->
+          Map.new(rows, fn [pk, value] ->
+            {normalize_key(pk, pk_col, resource), decode_aggregate(value, kind, field, resource)}
+          end)
+
+        _ ->
+          %{}
+      end
     end
   end
 
-  defp compute_same_table_aggregate(kind, field, resource, repo, opts, pk_values) do
-    table = qualified_table(resource)
-    {pk_where, pk_params} = build_pk_where_from_map(pk_values, resource)
-    cql_field = aggregate_field_to_cql(kind, field, resource)
-
-    query = "SELECT #{cql_field} FROM #{table} WHERE #{pk_where}"
-
-    case repo.query(query, pk_params, opts) do
-      {:ok, %ClickHouse.Result{rows: [[value]]}} -> {:ok, value}
-      _ -> :error
-    end
-  end
-
-  defp compute_related_table_aggregate(kind, field, path, resource, repo, opts, pk_values) do
-    related = Info.related(resource, path)
-    relationship = Info.relationship(resource, List.first(path))
+  # Aggregating a field on a related table (has_many/has_one/belongs_to) — batch
+  # as a single SELECT ... GROUP BY fk, keyed by the *source* record's join
+  # column value.
+  defp batched_related_aggregate(
+         kind,
+         field,
+         rel_name,
+         pkey,
+         records,
+         resource,
+         repo,
+         opts,
+         default_value
+       ) do
+    relationship = Info.relationship(resource, rel_name)
+    related = Info.related(resource, [rel_name])
     related_table = qualified_table(related)
 
     case relationship.type do
       :belongs_to ->
-        fk_value = Map.get(pk_values, relationship.source_attribute)
+        fk_values = Enum.map(records, &Map.get(&1, relationship.source_attribute)) |> Enum.uniq()
         dest_pkey = Info.primary_key(related)
 
         if length(dest_pkey) == 1 do
-          [pk_col] = dest_pkey
+          [dest_pk] = dest_pkey
           cql_field = aggregate_field_to_cql(kind, field, related)
+          {in_clause, in_params} = build_in_clause(dest_pk, fk_values, related)
 
           query =
-            "SELECT #{cql_field} FROM #{related_table} WHERE #{Identifier.quote_name(pk_col)} = ?"
+            "SELECT #{Identifier.quote_name(dest_pk)}, #{cql_field} FROM #{related_table} WHERE #{in_clause}"
 
-          case repo.query(query, [fk_value], opts) do
-            {:ok, %ClickHouse.Result{rows: [[value]]}} -> {:ok, value}
-            _ -> :error
-          end
+          handle_aggregate_result(
+            repo,
+            query,
+            in_params,
+            opts,
+            kind,
+            field,
+            related,
+            relationship.source_attribute,
+            pkey,
+            records,
+            default_value,
+            dest_pk
+          )
         else
-          :error
+          %{}
         end
 
+      type when type in [:has_many, :has_one] ->
+        dest_fk = relationship.destination_attribute
+
+        source_values =
+          Enum.map(records, &Map.get(&1, relationship.source_attribute)) |> Enum.uniq()
+
+        cql_field = aggregate_field_to_cql(kind, field, related)
+        {in_clause, in_params} = build_in_clause(dest_fk, source_values, related)
+
+        query =
+          "SELECT #{Identifier.quote_name(dest_fk)}, #{cql_field} FROM #{related_table} " <>
+            "WHERE #{in_clause} GROUP BY #{Identifier.quote_name(dest_fk)}"
+
+        handle_aggregate_result(
+          repo,
+          query,
+          in_params,
+          opts,
+          kind,
+          field,
+          related,
+          relationship.source_attribute,
+          pkey,
+          records,
+          default_value,
+          dest_fk
+        )
+
       _ ->
-        :error
+        %{}
     end
+  end
+
+  # Runs a batched aggregate SELECT and folds the rows into a map keyed by the
+  # source record's `pkey` lookup key. Returns `%{}` when the query fails.
+  defp handle_aggregate_result(
+         repo,
+         query,
+         params,
+         opts,
+         kind,
+         field,
+         related,
+         fk_attr,
+         pkey,
+         records,
+         default_value,
+         key_col
+       ) do
+    case repo.query(query, params, opts) do
+      {:ok, %ClickHouse.Result{rows: rows}} ->
+        source_map =
+          Map.new(rows, fn [key_val, value] ->
+            {normalize_key(key_val, key_col, related),
+             decode_aggregate(value, kind, field, related)}
+          end)
+
+        Map.new(records, fn record ->
+          fk = Map.get(record, fk_attr)
+          {pk_lookup_key(record, pkey), Map.get(source_map, fk, default_value)}
+        end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  # Normalizes a key returned by ClickHouse (e.g. a UUID column comes back as a
+  # 16-byte binary) to the form used by decoded Ash records (UUIDs are decoded
+  # to their canonical 36-character string), so batched results merge correctly.
+  defp normalize_key(value, column, resource) do
+    uuid_fields = Types.uuid_attribute_names(resource)
+
+    if column in uuid_fields and is_binary(value) and byte_size(value) == 16 do
+      case Types.uuid_binary_to_string(value) do
+        {:ok, string} -> string
+        _ -> value
+      end
+    else
+      value
+    end
+  end
+
+  defp build_in_clause(col, values, resource) do
+    uuid_fields = Types.uuid_attribute_names(resource)
+    placeholders = Enum.map_join(values, ", ", fn _ -> "?" end)
+    params = Enum.map(values, &convert_uuid_param(&1, col, uuid_fields))
+    {"#{Identifier.quote_name(col)} IN (#{placeholders})", params}
   end
 
   defp aggregate_field_to_cql(:count, nil, _resource), do: "COUNT(*)"
 
   defp aggregate_field_to_cql(kind, field, resource),
     do: "#{String.upcase(to_string(kind))}(#{resolve_aggregate_field(field, resource)})"
-
-  defp build_pk_where_from_map(pk_values, resource) do
-    {clauses, values} =
-      Enum.reduce(pk_values, {[], []}, fn {k, v}, {cs, vs} ->
-        {["#{Identifier.quote_name(to_string(k))} = ?" | cs], [v | vs]}
-      end)
-
-    {Enum.reverse(clauses) |> Enum.join(" AND "),
-     convert_uuid_params(:lists.reverse(values), resource)}
-  end
 
   # ============================================================================
   # Calculations
@@ -985,7 +1175,7 @@ defmodule AshClickhouse.DataLayer do
         {[Identifier.quote_name(to_string(k)) | fs], [value | vs]}
       end)
 
-    {Enum.reverse(fields), convert_uuid_params(:lists.reverse(values), resource)}
+    {Enum.reverse(fields), :lists.reverse(values)}
   end
 
   defp build_set_clauses(attrs, resource) do
@@ -998,7 +1188,7 @@ defmodule AshClickhouse.DataLayer do
         {["#{Identifier.quote_name(to_string(k))} = ?" | cs], [value | vs]}
       end)
 
-    {Enum.reverse(clauses), convert_uuid_params(:lists.reverse(values), resource)}
+    {Enum.reverse(clauses), :lists.reverse(values)}
   end
 
   defp attribute_map(resource) do
@@ -1029,47 +1219,35 @@ defmodule AshClickhouse.DataLayer do
   end
 
   defp build_where_clause(filters, resource) when is_list(filters) do
-    {clause, params} = QueryBuilder.build_where_clause(filters)
-    {clause, convert_uuid_params(params, resource)}
+    QueryBuilder.build_where_clause(filters, resource)
   end
 
   defp build_where_clause(nil, _resource), do: {"", []}
   defp build_where_clause([], _resource), do: {"", []}
 
   defp build_where_from_map(pk_map, resource) do
+    uuid_fields = Types.uuid_attribute_names(resource)
+
     {clauses, values} =
       Enum.reduce(pk_map, {[], []}, fn {k, v}, {cs, vs} ->
-        {["#{Identifier.quote_name(to_string(k))} = ?" | cs], [v | vs]}
+        {["#{Identifier.quote_name(to_string(k))} = ?" | cs],
+         [convert_uuid_param(v, k, uuid_fields) | vs]}
       end)
 
-    {Enum.reverse(clauses) |> Enum.join(" AND "),
-     convert_uuid_params(:lists.reverse(values), resource)}
+    {Enum.reverse(clauses) |> Enum.join(" AND "), :lists.reverse(values)}
   end
 
-  defp uuid_field?(k, v, uuid_fields) do
-    is_binary(v) and (k in uuid_fields or Types.uuid_like_string?(v))
+  defp uuid_field?(k, _v, uuid_fields) do
+    k in uuid_fields
   end
 
-  defp convert_uuid_params(params, _resource) do
-    Enum.flat_map(params, fn value ->
-      cond do
-        is_struct(value, MapSet) ->
-          MapSet.to_list(value)
-
-        is_binary(value) and byte_size(value) == 36 ->
-          if Types.uuid_like_string?(value) do
-            case Types.uuid_string_to_binary(value) do
-              {:ok, bin} -> [bin]
-              _ -> [value]
-            end
-          else
-            [value]
-          end
-
-        true ->
-          [value]
-      end
-    end)
+  # Converts a single parameter to its 16-byte UUID binary form *only* when the
+  # column it belongs to is known to be UUID-typed. This replaces the old
+  # `convert_uuid_params/2` heuristic that mangled any 36-character string that
+  # merely looked like a UUID — including legitimate `:string` business
+  # identifiers (order numbers, etc.).
+  defp convert_uuid_param(value, column, uuid_fields) do
+    Types.convert_uuid_param(value, column, uuid_fields)
   end
 
   # ============================================================================
@@ -1107,10 +1285,8 @@ defmodule AshClickhouse.DataLayer do
   defp generate_uuid do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
 
-    "#{format_hex(a, 8)}-#{format_hex(b, 4)}-#{format_hex(c, 4)}-#{format_hex(d, 4)}-#{format_hex(e, 12)}"
+    Types.format_uuid_string(a, b, c, d, e)
   end
-
-  defp format_hex(value, len), do: value |> Integer.to_string(16) |> String.pad_leading(len, "0")
 
   defp autogenerate_attribute?(attr) do
     Map.get(attr, :autogenerate?) == true or is_function(Map.get(attr, :default))
@@ -1323,11 +1499,9 @@ defmodule AshClickhouse.DataLayer do
   end
 
   defp to_existing_atom(value) do
-    try do
-      String.to_existing_atom(value)
-    rescue
-      ArgumentError -> value
-    end
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError -> value
   end
 
   defp maybe_put(opts, _key, nil), do: opts

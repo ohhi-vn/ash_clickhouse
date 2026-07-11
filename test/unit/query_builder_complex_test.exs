@@ -170,9 +170,17 @@ defmodule AshClickhouse.QueryBuilderComplexTest do
       bad = %{operator: :unknown_op, left: ref(:b), right: %{value: 2}}
       tree = %{op: :and, left: good, right: bad}
 
-      assert ExUnit.CaptureLog.capture_log(fn ->
-               assert where([tree]) == {"", []}
-             end) =~ "dropping untranslatable filter"
+      # Opt into the warn-and-drop behaviour; by default the data layer raises
+      # (fail-closed) so an untranslatable filter never silently widens scoping.
+      Application.put_env(:ash_clickhouse, :raise_on_untranslatable_filter, false)
+
+      try do
+        assert ExUnit.CaptureLog.capture_log(fn ->
+                 assert where([tree]) == {"", []}
+               end) =~ "dropping untranslatable filter"
+      after
+        Application.delete_env(:ash_clickhouse, :raise_on_untranslatable_filter)
+      end
     end
   end
 end

@@ -88,7 +88,7 @@ defmodule AshClickhouse.TypesTest do
   end
 
   test "string <-> binary" do
-    uuid = "550e8400-e29b-41d4-a716-446655440000"
+    uuid = "550E8400-E29B-41D4-A716-446655440000"
     {:ok, bin} = Types.uuid_string_to_binary(uuid)
     assert byte_size(bin) == 16
     {:ok, back} = Types.uuid_binary_to_string(bin)

@@ -43,6 +43,23 @@ The `use AshClickhouse.Repo` macro provides these functions:
 `config/0` and `query/3` / `query!/3` are `defoverridable`, so you can override
 them in your own Repo module if needed.
 
+## Application-wide configuration
+
+A few behaviours are controlled via `config :ash_clickhouse`:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `:raise_on_untranslatable_filter` | `true` | Raise (instead of warning) when a filter can't be translated to SQL. Fail-closed, so a `base_filter`/tenant scope can't be silently dropped. Set to `false` to revert to warning-only. |
+
+```elixir
+# config/config.exs
+config :ash_clickhouse, :raise_on_untranslatable_filter, false
+```
+
+The resource → repo resolution is cached in an ETS table for the life of the
+VM. Test suites that redefine resources or repo config between tests can clear
+it with `AshClickhouse.DataLayer.clear_repo_cache!/0`.
+
 ## Resource configuration
 
 See [Resources](resources.md) for the full `clickhouse` DSL options. The most

@@ -33,6 +33,19 @@ Boolean expressions, nested expressions, and `changeset_filter` are supported.
 Relationship filters (`filter_relationship`, unrelated `exists`,
 `aggregate_relationship`) are **not** supported yet.
 
+### Untranslatable filters fail closed
+
+If a filter cannot be expressed in ClickHouse SQL (e.g. an operator the data
+layer doesn't translate), the query raises by default. This is deliberate:
+silently dropping such a filter would make the query *less* restrictive than
+intended — a real risk for `base_filter` tenant scoping or soft-delete. To
+revert to the old warning-only behaviour, set:
+
+```elixir
+# config/config.exs
+config :ash_clickhouse, :raise_on_untranslatable_filter, false
+```
+
 ## Sorting, limit, offset, distinct
 
 ```elixir
@@ -67,6 +80,14 @@ MyApp.User
 # Aggregate defined on the resource
 Ash.read!(MyApp.User, query: [aggregate: :total_count])
 ```
+
+Relationship aggregates (attached to each record on read) support `belongs_to`,
+`has_many`, and `has_one` relationships. They are computed with a single batched
+query per aggregate across the whole result set (not one query per record),
+and decoded using the aggregated field's actual Ash type — so `Decimal` columns
+keep their precision and `count`/`sum`/etc. return the correct Elixir numeric
+type. Multi-hop relationship paths are not supported and fall back to the
+aggregate's `default_value`.
 
 `aggregate_filter` and `aggregate_sort` are not supported.
 

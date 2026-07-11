@@ -7,8 +7,8 @@ defmodule Mix.Tasks.AshClickhouse.Migrate do
 
   use Mix.Task
 
-  alias AshClickhouse.Migration
   alias AshClickhouse.DataLayer.Dsl
+  alias AshClickhouse.Migration
 
   @impl Mix.Task
   def run(_args) do
@@ -24,31 +24,34 @@ defmodule Mix.Tasks.AshClickhouse.Migrate do
         if is_nil(resource_repo) or resource_repo == repo do
           if Dsl.migrate?(resource) do
             create_statements = Migration.generate_resource_cql(resource)
-
-            Enum.each(create_statements, fn statement ->
-              case repo.query(statement, []) do
-                {:ok, _} ->
-                  Mix.shell().info("Migrated #{inspect(resource)}")
-
-                {:error, reason} ->
-                  Mix.shell().error("Failed to migrate #{inspect(resource)}: #{inspect(reason)}")
-              end
-            end)
+            run_statements(repo, create_statements, "Migrated", resource)
 
             alter_statements = Migration.alter_table_cql(resource, repo)
+            run_statements(repo, alter_statements, "Altered", resource)
 
-            Enum.each(alter_statements, fn statement ->
-              case repo.query(statement, []) do
-                {:ok, _} ->
-                  Mix.shell().info("Altered #{inspect(resource)}")
+            {index_statements, index_warnings} = Migration.alter_indexes_cql(resource, repo)
+            run_statements(repo, index_statements, "Added index for", resource)
 
-                {:error, reason} ->
-                  Mix.shell().error("Failed to alter #{inspect(resource)}: #{inspect(reason)}")
-              end
+            Enum.each(index_warnings, fn warning ->
+              Mix.shell().error(warning)
             end)
           end
         end
       end)
+    end)
+  end
+
+  defp run_statements(repo, statements, verb, resource) do
+    Enum.each(statements, fn statement ->
+      case repo.query(statement, []) do
+        {:ok, _} ->
+          Mix.shell().info("#{verb} #{inspect(resource)}")
+
+        {:error, reason} ->
+          Mix.shell().error(
+            "Failed to #{String.downcase(verb)} #{inspect(resource)}: #{inspect(reason)}"
+          )
+      end
     end)
   end
 

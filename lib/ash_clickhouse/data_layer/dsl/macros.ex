@@ -20,6 +20,14 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
       clickhouse do
         table "my_table"
         repo MyApp.Repo
+        engine "MergeTree()"
+        order_by "id"
+
+        # Data-skipping indexes (ClickHouse has no B-tree indexes). May be
+        # repeated; each becomes an `INDEX ... TYPE ... GRANULARITY ...` in the
+        # table DDL. `granularity` defaults to 1.
+        index name: :idx_user_id, expression: "user_id", type: "bloom_filter"
+        index name: :idx_created_at, expression: "created_at", type: "minmax", granularity: 4
       end
 
   The runtime getters (e.g. `AshClickhouse.DataLayer.Dsl.table/1`) live in
@@ -77,6 +85,12 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
         {:mutations_sync, meta, [value]} ->
           set(meta, :__set_mutations_sync__, value)
 
+        {:index, meta, [[name: name, expression: expr, type: type]]} ->
+          add_index(meta, name, expr, type, 1)
+
+        {:index, meta, [[name: name, expression: expr, type: type, granularity: gran]]} ->
+          add_index(meta, name, expr, type, gran)
+
         other ->
           other
       end)
@@ -96,6 +110,7 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
       @ash_clickhouse_migrate true
       @ash_clickhouse_insert_opts []
       @ash_clickhouse_mutations_sync nil
+      @ash_clickhouse_indexes []
 
       unquote(transformed)
 
@@ -113,7 +128,8 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
         description: @ash_clickhouse_description,
         migrate: @ash_clickhouse_migrate,
         insert_opts: @ash_clickhouse_insert_opts,
-        mutations_sync: @ash_clickhouse_mutations_sync
+        mutations_sync: @ash_clickhouse_mutations_sync,
+        indexes: @ash_clickhouse_indexes
       }
 
       def __ash_clickhouse__(key), do: Map.get(@ash_clickhouse_config, key)
@@ -123,6 +139,12 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
   defp set(meta, fun, value) do
     {{:., meta, [{:__aliases__, meta, [:AshClickhouse, :DataLayer, :Dsl, :Macros]}, fun]}, meta,
      [{:__MODULE__, [], nil}, value]}
+  end
+
+  defp add_index(meta, name, expression, type, granularity) do
+    {{:., meta,
+      [{:__aliases__, meta, [:AshClickhouse, :DataLayer, :Dsl, :Macros]}, :__add_index__]}, meta,
+     [{:__MODULE__, [], nil}, name, expression, type, granularity]}
   end
 
   # --- setters (called at compile time) ------------------------------------
@@ -176,6 +198,30 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
   @doc false
   def __set_insert_opts__(module, value) when is_list(value),
     do: Module.put_attribute(module, :ash_clickhouse_insert_opts, value)
+
+  @doc false
+  def __add_index__(module, name, expression, type, granularity)
+      when is_atom(name) and is_binary(expression) and is_binary(type) and is_integer(granularity) do
+    valid_types = ~w(minmax set bloom_filter ngrambf_v1 tokenbf_v1)
+
+    unless type in valid_types do
+      raise ArgumentError, """
+      Invalid ClickHouse data-skipping index type: #{inspect(type)}.
+      Valid types are: #{Enum.join(valid_types, ", ")}.
+      """
+    end
+
+    existing = Module.get_attribute(module, :ash_clickhouse_indexes) || []
+
+    Module.put_attribute(
+      module,
+      :ash_clickhouse_indexes,
+      existing ++
+        [
+          %{name: name, expression: expression, type: type, granularity: granularity}
+        ]
+    )
+  end
 
   @doc false
   def __set_mutations_sync__(module, value) when value in [nil, 1, 2],

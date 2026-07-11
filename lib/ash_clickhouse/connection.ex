@@ -102,9 +102,13 @@ defmodule AshClickhouse.Connection do
           {:ok, term()} | {:error, term()}
   def query(conn_or_name, sql, params \\ [], opts \\ []) do
     {conn, opts} = resolve_conn(conn_or_name, opts)
+
     ClickHouse.query(conn, sql, params, with_default_format(opts))
   rescue
-    e -> {:error, e}
+    e ->
+      Logger.error("AshClickhouse.Connection.query failed: #{Exception.message(e)}")
+      Logger.debug("Stacktrace:\n" <> Exception.format_stacktrace(__STACKTRACE__))
+      {:error, e}
   end
 
   @doc """
@@ -131,7 +135,10 @@ defmodule AshClickhouse.Connection do
     {conn, opts} = resolve_conn(conn_or_name, opts)
     ClickHouse.query(conn, statement, rows, with_default_format(opts))
   rescue
-    e -> {:error, e}
+    e ->
+      Logger.error("AshClickhouse.Connection.insert_rows failed: #{Exception.message(e)}")
+      Logger.debug("Stacktrace:\n" <> Exception.format_stacktrace(__STACKTRACE__))
+      {:error, e}
   end
 
   @doc """
@@ -189,7 +196,9 @@ defmodule AshClickhouse.Connection do
       {:error, reason} -> {:error, reason}
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.debug("AshClickhouse.Connection.do_stop_client rescued on shutdown: #{inspect(e)}")
+      :ok
   end
 
   # The ClickHouse client is started as an unnamed Supervisor and referenced

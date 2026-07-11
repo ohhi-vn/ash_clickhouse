@@ -55,6 +55,7 @@ defmodule AshClickhouse.DataLayer.Dsl do
   - `:migrate` — whether this resource is included in migrations (default `true`)
   - `:insert_opts` — options applied to bulk inserts (e.g. `async_insert: 1`)
   - `:mutations_sync` — default `mutations_sync` for ALTER mutations (`1`/`2`/`nil`)
+  - `:index` — repeated; declares a data-skipping index (see `clickhouse do ... end`)
   """
 
   # --- getters -------------------------------------------------------------
@@ -128,6 +129,10 @@ defmodule AshClickhouse.DataLayer.Dsl do
   @doc "The configured default_context."
   @spec default_context(module()) :: map() | nil
   def default_context(resource), do: get_config(resource, :default_context)
+
+  @doc "The configured data-skipping indexes."
+  @spec indexes(module()) :: [map()]
+  def indexes(resource), do: get_config(resource, :indexes, [])
 
   @doc "The configured description."
   @spec description(module()) :: String.t() | nil

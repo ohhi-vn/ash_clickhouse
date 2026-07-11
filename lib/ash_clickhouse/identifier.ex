@@ -19,6 +19,15 @@ defmodule AshClickhouse.Identifier do
       iex> AshClickhouse.Identifier.quote_name("my`table")
       "`my``table`"
 
+  Column identifiers go through `quote_name/1` (backtick-escaping) rather than
+  the stricter `sanitize!/1` used for table/database names. This is intentional:
+  Ash attribute names are derived from atoms and are already safe, and
+  `quote_name/1` additionally tolerates arbitrary (e.g. expression-derived)
+  column labels without rejecting valid identifiers that merely fall outside the
+  `[a-zA-Z_][a-zA-Z0-9_]*` pattern. Table and database names, by contrast, are
+  developer-supplied strings validated up front by `sanitize!/1` so a bad name
+  fails loudly at DDL time rather than producing malformed SQL.
+
   """
   @spec quote_name(String.t() | atom()) :: String.t()
   def quote_name(name) when is_atom(name), do: quote_name(to_string(name))

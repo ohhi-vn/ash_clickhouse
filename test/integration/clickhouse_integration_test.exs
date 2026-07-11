@@ -13,7 +13,7 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
      to an already-running ClickHouse instance instead of spinning up a
      container. This is useful in CI or local development:
 
-         CLICKHOUSE_DIRECT=1 CLICKHOUSE_URL=http://localhost:8123 \\
+         CLICKHOUSE_DIRECT=1 CLICKHOUSE_URL=http://localhost:8123 MIX_ENV=test \
            mix test.integration
 
   The test database is created on demand and dropped afterwards.
@@ -32,9 +32,9 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
   require Logger
   import Ash.Query
 
+  alias AshClickhouse.ClickhouseContainer
   alias AshClickhouse.TestRepo
   alias AshClickhouse.TestResource
-  alias AshClickhouse.ClickhouseContainer
 
   @moduletag :integration
 

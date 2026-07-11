@@ -14,9 +14,9 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
   require Logger
   import Ash.Query
 
+  alias AshClickhouse.ClickhouseContainer
   alias AshClickhouse.TestRepo
   alias AshClickhouse.TestResource
-  alias AshClickhouse.ClickhouseContainer
 
   @moduletag :integration
 

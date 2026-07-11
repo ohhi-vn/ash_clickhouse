@@ -16,8 +16,6 @@ ClickHouse is a full SQL columnar store, so most Ash query features map directly
 - Native aggregates (`count`, `sum`, `avg`, `min`, `max`)
 - `multitenancy` (database- or attribute-based)
 - `calculate`, `composite_primary_key`, `nested_expressions`, `boolean_filter`
-- Native aggregates (`count`, `sum`, `avg`, `min`, `max`)
-- `multitenancy` (database- or attribute-based)
 
 ### Not supported
 
@@ -121,6 +119,35 @@ users = Ash.read!(MyApp.User)
 | `base_filter` | Filter applied to all queries |
 | `default_context` | Context merged into every query/changeset |
 | `migrate` | Whether to include in migrations (default `true`) |
+| `index` | Declares a data-skipping index (repeatable) |
+
+### Data-skipping indexes
+
+ClickHouse has no B-tree indexes; it uses *data-skipping* indexes (`minmax`,
+`set`, `bloom_filter`, `ngrambf_v1`, `tokenbf_v1`) declared in the table DDL.
+Declare them inside the `clickhouse` block — the `index` macro may be repeated,
+and `granularity` defaults to `1`:
+
+```elixir
+clickhouse do
+  table "events"
+  repo MyApp.Repo
+  order_by "id"
+
+  index name: :idx_user_id, expression: "user_id", type: "bloom_filter"
+  index name: :idx_created_at, expression: "created_at", type: "minmax", granularity: 4
+end
+```
+
+Indexes are **additive only**. `mix ash_clickhouse.migrate` emits them in the
+`CREATE TABLE` statement for new tables, and issues `ALTER TABLE ... ADD INDEX
+IF NOT EXISTS` for existing tables that lack them. Changing an existing index's
+`type`/`expression` is **not** auto-applied — `ADD INDEX IF NOT EXISTS` no-ops on
+a name collision. The migrate task instead prints a warning (with the exact
+`DROP INDEX` + `ADD INDEX` SQL to run) when an existing index's stored
+definition differs from the DSL. To change a definition, manually `ALTER TABLE ...
+DROP INDEX` and re-run the migration. (A typo in `type` is rejected at compile
+time.)
 
 ### Repo
 

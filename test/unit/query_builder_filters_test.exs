@@ -136,15 +136,27 @@ defmodule AshClickhouse.QueryBuilderFiltersTest do
   end
 
   describe "untranslatable filters are surfaced, not silently dropped (item #1)" do
-    test "a malformed filter shape produces no predicate and is reported" do
+    test "defaults to fail-closed (raise) so tenant/base_filter gaps surface loudly" do
+      assert Application.get_env(:ash_clickhouse, :raise_on_untranslatable_filter, true) == true
+    end
+
+    test "a malformed filter shape produces no predicate and is reported (when opting into warnings)" do
       # Capture the warning that build_where_clause emits for an untranslatable
       # filter. The filter is dropped from the SQL (no row leak), but a warning
-      # is logged so the gap is visible.
+      # is logged so the gap is visible. This is the *opt-in* behaviour; by
+      # default the data layer raises (fail-closed) to avoid silently widening
+      # tenant/base_filter scoping.
       filter = %{operator: :unknown_op, left: ref(:a), right: %{value: 1}}
 
-      assert ExUnit.CaptureLog.capture_log(fn ->
-               assert where(filter) == {"", []}
-             end) =~ "dropping untranslatable filter"
+      Application.put_env(:ash_clickhouse, :raise_on_untranslatable_filter, false)
+
+      try do
+        assert ExUnit.CaptureLog.capture_log(fn ->
+                 assert where(filter) == {"", []}
+               end) =~ "dropping untranslatable filter"
+      after
+        Application.delete_env(:ash_clickhouse, :raise_on_untranslatable_filter)
+      end
     end
 
     test "when raise_on_untranslatable_filter is enabled, an unknown filter raises" do
@@ -161,13 +173,19 @@ defmodule AshClickhouse.QueryBuilderFiltersTest do
       end
     end
 
-    test "an untranslatable child makes the whole conjunction untranslatable" do
+    test "an untranslatable child makes the whole conjunction untranslatable (when opting into warnings)" do
       good = %{operator: :eq, left: ref(:a), right: %{value: 1}}
       bad = %{operator: :unknown_op, left: ref(:a), right: %{value: 1}}
 
-      assert ExUnit.CaptureLog.capture_log(fn ->
-               assert where(%{op: :and, left: good, right: bad}) == {"", []}
-             end) =~ "dropping untranslatable filter"
+      Application.put_env(:ash_clickhouse, :raise_on_untranslatable_filter, false)
+
+      try do
+        assert ExUnit.CaptureLog.capture_log(fn ->
+                 assert where(%{op: :and, left: good, right: bad}) == {"", []}
+               end) =~ "dropping untranslatable filter"
+      after
+        Application.delete_env(:ash_clickhouse, :raise_on_untranslatable_filter)
+      end
     end
   end
 

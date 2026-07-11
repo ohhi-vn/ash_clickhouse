@@ -84,6 +84,54 @@ defmodule AshClickhouse.DslTest do
     end
   end
 
+  defmodule ResourceWithIndexes do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("indexed_table")
+      repo(AshClickhouse.TestRepo)
+      order_by("id")
+
+      index(name: :idx_user_id, expression: "user_id", type: "bloom_filter")
+      index(name: :idx_created_at, expression: "created_at", type: "minmax", granularity: 4)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:user_id, :string)
+      attribute(:created_at, :utc_datetime)
+    end
+  end
+
+  describe "index DSL" do
+    test "indexes are accumulated and read back via Dsl.indexes/1" do
+      indexes = Dsl.indexes(ResourceWithIndexes)
+      assert length(indexes) == 2
+
+      assert Enum.find(indexes, fn idx -> idx.name == :idx_user_id end) == %{
+               name: :idx_user_id,
+               expression: "user_id",
+               type: "bloom_filter",
+               granularity: 1
+             }
+
+      assert Enum.find(indexes, fn idx -> idx.name == :idx_created_at end) == %{
+               name: :idx_created_at,
+               expression: "created_at",
+               type: "minmax",
+               granularity: 4
+             }
+    end
+
+    test "a resource without indexes returns an empty list" do
+      assert Dsl.indexes(ResourceWithFullConfig) == []
+    end
+  end
+
   describe "top-level-only DSL walk" do
     test "a nested call shaped like a DSL key inside a value is not rewritten" do
       # `partition_by` receives an expression that itself contains a call named

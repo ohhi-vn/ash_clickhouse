@@ -26,6 +26,11 @@ clickhouse do
   primary_key [:id]
   settings "index_granularity = 8192"
 
+  # Data-skipping indexes (ClickHouse has no B-tree indexes). May be repeated;
+  # `granularity` defaults to 1.
+  index name: :idx_user_id, expression: "user_id", type: "bloom_filter"
+  index name: :idx_created_at, expression: "created_at", type: "minmax", granularity: 4
+
   migrate true
   insert_opts async_insert: 1, wait_for_async_insert: 1
   mutations_sync 1
@@ -53,6 +58,7 @@ getters, so a resource can define a local helper named like a DSL key (e.g.
 | `default_context` | `map()` | — | Context merged into every query/changeset |
 | `description` | `String.t()` | — | Human-readable description |
 | `migrate` | `boolean()` | `true` | Whether to include in migrations |
+| `index` | `{name:, expression:, type:}` / `{name:, expression:, type:, granularity:}` | — | Repeatable; declares a data-skipping index |
 | `insert_opts` | `keyword()` | `[]` | Options applied to bulk inserts |
 | `mutations_sync` | `nil \| 1 \| 2` | `nil` | Default `mutations_sync` for ALTER mutations |
 
@@ -67,6 +73,7 @@ AshClickhouse.DataLayer.Dsl.engine(MyApp.User)          # => "MergeTree()"
 AshClickhouse.DataLayer.Dsl.migrate?(MyApp.User)        # => true
 AshClickhouse.DataLayer.Dsl.insert_opts(MyApp.User)     # => [async_insert: 1, ...]
 AshClickhouse.DataLayer.Dsl.mutations_sync(MyApp.User)  # => 1
+AshClickhouse.DataLayer.Dsl.indexes(MyApp.User)        # => [%{name:, expression:, type:, granularity:}, ...]
 ```
 
 ## Attributes and types

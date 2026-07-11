@@ -23,6 +23,7 @@ defmodule AshClickhouse.DataLayer.Types do
   | `:array` / `:list` | `Array(String)` |
   """
 
+  alias Ash.Resource.Info
   alias Ash.Type
 
   @doc """
@@ -84,7 +85,7 @@ defmodule AshClickhouse.DataLayer.Types do
   end
 
   def ash_type_to_clickhouse({:tuple, element_types}) when is_list(element_types) do
-    inner = element_types |> Enum.map(&ash_type_to_clickhouse/1) |> Enum.join(", ")
+    inner = Enum.map_join(element_types, ", ", &ash_type_to_clickhouse/1)
     "Tuple(#{inner})"
   end
 
@@ -123,7 +124,7 @@ defmodule AshClickhouse.DataLayer.Types do
   @spec uuid_attribute_names(module()) :: MapSet.t()
   def uuid_attribute_names(resource) do
     resource
-    |> Ash.Resource.Info.attributes()
+    |> Info.attributes()
     |> Enum.filter(fn attr ->
       case attr.type do
         Type.UUID -> true
@@ -196,22 +197,30 @@ defmodule AshClickhouse.DataLayer.Types do
   `Map(String, String)` / `Array(String)` column types), and time strings
   are parsed back into `Time` structs.
   """
+  @type_dispatch %{
+    Type.Time => :time,
+    :time => :time,
+    :time_usec => :time,
+    Type.Integer => :integer,
+    :integer => :integer,
+    Type.Float => :float,
+    :float => :float,
+    :double => :float,
+    Type.Boolean => :boolean,
+    :boolean => :boolean,
+    Type.Decimal => :decimal,
+    :decimal => :decimal
+  }
+
   @spec decode_value(term(), map()) :: term()
   def decode_value(value, attr) when is_map(attr) do
-    case attr.type do
-      Type.Time -> decode_time(value)
+    case Map.get(@type_dispatch, attr.type) do
       :time -> decode_time(value)
-      :time_usec -> decode_time(value)
-      Type.Integer -> decode_integer(value)
       :integer -> decode_integer(value)
-      Type.Float -> decode_float(value)
       :float -> decode_float(value)
-      :double -> decode_float(value)
-      Type.Boolean -> decode_boolean(value)
       :boolean -> decode_boolean(value)
-      Type.Decimal -> decode_decimal(value)
       :decimal -> decode_decimal(value)
-      _ -> value
+      nil -> value
     end
   end
 
@@ -291,7 +300,7 @@ defmodule AshClickhouse.DataLayer.Types do
   @spec atom_attribute_names(module()) :: MapSet.t(atom())
   def atom_attribute_names(resource) do
     resource
-    |> Ash.Resource.Info.attributes()
+    |> Info.attributes()
     |> Enum.filter(fn attr ->
       case attr.type do
         Type.Atom -> true
@@ -309,7 +318,7 @@ defmodule AshClickhouse.DataLayer.Types do
   @spec attr_type_map(module()) :: %{(atom() | String.t()) => String.t()}
   def attr_type_map(resource) do
     resource
-    |> Ash.Resource.Info.attributes()
+    |> Info.attributes()
     |> Enum.reduce(%{}, fn attr, acc ->
       type = resolve_attr_type(attr)
 
@@ -347,13 +356,38 @@ defmodule AshClickhouse.DataLayer.Types do
   def uuid_binary_to_string(value) when is_binary(value) and byte_size(value) == 16 do
     <<a::32, b::16, c::16, d::16, e::48>> = value
 
-    {:ok,
-     String.downcase(
-       "#{format_hex(a, 8)}-#{format_hex(b, 4)}-#{format_hex(c, 4)}-#{format_hex(d, 4)}-#{format_hex(e, 12)}"
-     )}
+    {:ok, format_uuid_string(a, b, c, d, e)}
   end
 
   def uuid_binary_to_string(_), do: :error
+
+  @doc """
+  Formats the five 16-byte UUID segments into a canonical 36-character
+  (lowercase) UUID string.
+  """
+  @spec format_uuid_string(integer(), integer(), integer(), integer(), integer()) :: String.t()
+  def format_uuid_string(a, b, c, d, e) do
+    "#{format_hex(a, 8)}-#{format_hex(b, 4)}-#{format_hex(c, 4)}-#{format_hex(d, 4)}-#{format_hex(e, 12)}"
+  end
+
+  @doc """
+  Converts a single parameter to its 16-byte UUID binary form *only* when the
+  column it belongs to is known to be UUID-typed. This replaces the old
+  `convert_uuid_params/2` heuristic that mangled any 36-character string that
+  merely looked like a UUID — including legitimate `:string` business
+  identifiers (order numbers, etc.).
+  """
+  @spec convert_uuid_param(term(), term(), MapSet.t()) :: term()
+  def convert_uuid_param(value, column, uuid_fields) do
+    if column in uuid_fields and is_binary(value) and byte_size(value) == 36 do
+      case uuid_string_to_binary(value) do
+        {:ok, bin} -> bin
+        _ -> value
+      end
+    else
+      value
+    end
+  end
 
   defp format_hex(value, len) do
     value

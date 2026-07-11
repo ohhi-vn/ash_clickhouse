@@ -56,8 +56,45 @@ defmodule AshClickhouse.DataLayerEdgeTest do
           {:ok, :not_a_result}
 
         :aggregate ->
-          {:ok,
-           %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [[42]], columns: ["r"]}}
+          # Relationship aggregates are now batched as a single `SELECT pk,
+          # agg FROM ... WHERE pk IN (...)` query, which returns two columns.
+          # Query-level aggregates (run_aggregate_query/3) use a single-column
+          # `SELECT agg FROM ...` with no IN clause.
+          #
+          # The main data query (no IN clause, no aggregate function) must still
+          # return the real rows so each record has a primary key that the
+          # batched aggregate result can be merged into.
+          cond do
+            Regex.match?(~r/WHERE\s+`id`\s+IN/i, sql) ->
+              {:ok,
+               %ClickHouse.Result{
+                 raw: "",
+                 meta: %{},
+                 compressed: false,
+                 rows: [["id-1", 42]],
+                 columns: ["id", "result"]
+               }}
+
+            Regex.match?(~r/^SELECT\s+(COUNT|SUM|AVG|MIN|MAX)\(/i, sql) ->
+              {:ok,
+               %ClickHouse.Result{
+                 raw: "",
+                 meta: %{},
+                 compressed: false,
+                 rows: [[42]],
+                 columns: ["r"]
+               }}
+
+            true ->
+              {:ok,
+               %ClickHouse.Result{
+                 raw: "",
+                 meta: %{},
+                 compressed: false,
+                 rows: [["id-1", "alice", "alice@example.com", 30]],
+                 columns: ["id", "name", "email", "age"]
+               }}
+          end
 
         :aggregate_empty ->
           {:ok, %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: []}}

@@ -123,7 +123,7 @@ defmodule AshClickhouse.TypesEdgeTest do
 
   describe "uuid helpers edge cases" do
     test "round trips a UUID through binary and string" do
-      uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+      uuid = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"
       {:ok, bin} = Types.uuid_string_to_binary(uuid)
       assert byte_size(bin) == 16
       {:ok, back} = Types.uuid_binary_to_string(bin)

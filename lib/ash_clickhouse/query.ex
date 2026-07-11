@@ -41,11 +41,14 @@ defmodule AshClickhouse.Query do
     sorts: []
   ]
 
+  alias AshClickhouse.DataLayer
+  alias AshClickhouse.DataLayer.Dsl
+
   @doc "Creates a new query from a resource and repo."
   @spec new(module(), module()) :: t()
   def new(resource, repo) do
-    table = AshClickhouse.DataLayer.source(resource)
-    database = AshClickhouse.DataLayer.Dsl.database(resource)
+    table = DataLayer.source(resource)
+    database = Dsl.database(resource)
 
     %__MODULE__{
       resource: resource,
@@ -59,7 +62,7 @@ defmodule AshClickhouse.Query do
   @doc "Creates a new query from just a resource (repo resolved from DSL)."
   @spec new(module()) :: t()
   def new(resource) do
-    repo = AshClickhouse.DataLayer.Dsl.repo(resource)
+    repo = Dsl.repo(resource)
     new(resource, repo)
   end
 end

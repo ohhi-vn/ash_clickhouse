@@ -21,6 +21,7 @@ calls `create_database/0`.
 
 1. Runs `Migration.generate_resource_cql/1` (`CREATE TABLE IF NOT EXISTS`)
 2. Runs `Migration.alter_table_cql/2` (schema evolution for existing tables)
+3. Runs `Migration.alter_indexes_cql/2` (adds missing data-skipping indexes)
 
 Resources with `migrate false` are skipped.
 
@@ -47,6 +48,7 @@ The generated clauses are:
 - `ORDER BY (<order_by>)` (required for most engines)
 - `PRIMARY KEY (<primary_key>)` (if set)
 - `SETTINGS <settings>` (if set)
+- `INDEX <name> (<expression>) TYPE <type> GRANULARITY <n>` (one per `index` in the `clickhouse` block)
 
 The database is qualified only when a `database` is configured on the resource
 or repo.
@@ -57,6 +59,44 @@ Because ClickHouse does not support transactional migrations the way
 relational databases do, `alter_table_cql/2` emits `ALTER TABLE` statements to
 add new columns when the resource definition changes. Run `mix ash_clickhouse.migrate`
 again after changing attributes to apply the diff.
+
+### Data-skipping indexes
+
+ClickHouse has no B-tree indexes; it uses *data-skipping* indexes declared in
+the table DDL. Declare them in the `clickhouse` block (the `index` macro may be
+repeated, and `granularity` defaults to `1`):
+
+```elixir
+clickhouse do
+  table "events"
+  repo MyApp.Repo
+  order_by "id"
+
+  index name: :idx_user_id, expression: "user_id", type: "bloom_filter"
+  index name: :idx_created_at, expression: "created_at", type: "minmax", granularity: 4
+end
+```
+
+`mix ash_clickhouse.migrate` emits the indexes in the `CREATE TABLE` statement
+for new tables, and issues `ALTER TABLE ... ADD INDEX IF NOT EXISTS` for
+existing tables that lack them. Index `type` is validated against a whitelist
+(`minmax`, `set`, `bloom_filter`, `ngrambf_v1`, `tokenbf_v1`) at compile time,
+so a typo fails at compile rather than at migrate.
+
+Indexes are **additive only**. Changing an existing index's `type` or
+`expression` is *not* auto-applied — `ADD INDEX IF NOT EXISTS` no-ops on a name
+collision. Instead, the migrate task prints a warning (with the exact
+`DROP INDEX` + `ADD INDEX` SQL to run) when an existing index's stored
+definition differs from the DSL. To change a definition, manually run:
+
+```sql
+ALTER TABLE my_db.events DROP INDEX `idx_user_id`;
+ALTER TABLE my_db.events ADD INDEX `idx_user_id` (user_id) TYPE bloom_filter GRANULARITY 1;
+```
+
+The `expression` comparison is best-effort (ClickHouse normalizes stored
+expressions), so treat a `type` mismatch as authoritative and double-check
+`expression` mismatches by hand before acting.
 
 ## Type mapping
 

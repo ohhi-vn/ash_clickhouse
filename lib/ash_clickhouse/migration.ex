@@ -32,7 +32,10 @@ defmodule AshClickhouse.Migration do
       resource
       |> Info.attributes()
       |> Enum.map(&column_definition(&1, resource))
-      |> Enum.join(",\n  ")
+
+    index_defs = Enum.map(Dsl.indexes(resource), &index_definition_cql/1)
+
+    columns_and_indexes = Enum.join(columns ++ index_defs, ",\n  ")
 
     order_by = resolve_order_by(resource)
     partition_by = Dsl.partition_by(resource)
@@ -65,7 +68,7 @@ defmodule AshClickhouse.Migration do
 
     parts = [
       "CREATE TABLE IF NOT EXISTS #{qualified} (",
-      "  #{columns}",
+      "  #{columns_and_indexes}",
       ")",
       "ENGINE = #{engine}",
       partition_clause,
@@ -77,6 +80,15 @@ defmodule AshClickhouse.Migration do
     parts
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
+  end
+
+  defp index_definition_cql(%{
+         name: name,
+         expression: expression,
+         type: type,
+         granularity: granularity
+       }) do
+    "INDEX #{Identifier.quote_name(name)} (#{expression}) TYPE #{type} GRANULARITY #{granularity}"
   end
 
   defp column_definition(attr, resource) do
@@ -140,11 +152,14 @@ defmodule AshClickhouse.Migration do
 
   defp inspect_numeric_default(value, type) when is_binary(value) do
     case Float.parse(value) do
-      {_num, ""} -> value
-      _ -> raise AshClickhouse.Error.ConfigurationError, """
-      Non-numeric default #{inspect(value)} is not valid for column type #{type}.
-      Defaults for numeric columns must be numbers.
-      """
+      {_num, ""} ->
+        value
+
+      _ ->
+        raise AshClickhouse.Error.ConfigurationError, """
+        Non-numeric default #{inspect(value)} is not valid for column type #{type}.
+        Defaults for numeric columns must be numbers.
+        """
     end
   end
 
@@ -170,8 +185,7 @@ defmodule AshClickhouse.Migration do
         pkey =
           resource
           |> Info.primary_key()
-          |> Enum.map(&Identifier.quote_name/1)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", &Identifier.quote_name/1)
 
         if pkey == "", do: "tuple()", else: pkey
 
@@ -220,6 +234,142 @@ defmodule AshClickhouse.Migration do
       "ALTER TABLE #{qualified} ADD COLUMN IF NOT EXISTS #{Identifier.quote_name(attr.name)} #{type}"
     end)
   end
+
+  @doc """
+  Generates `ALTER TABLE ... ADD INDEX IF NOT EXISTS` statements for indexes
+  configured on the resource but not yet present in ClickHouse, and detects
+  configured indexes whose *definition* differs from what's actually stored.
+
+  Returns `{statements, warnings}`:
+
+    * `statements` — safe, additive `ADD INDEX IF NOT EXISTS` statements for
+      indexes that don't exist yet.
+    * `warnings` — human-readable strings for indexes that exist under the
+      same name but with a different `type` or `expression` than configured.
+      These are **not** auto-corrected: ClickHouse requires `DROP INDEX` +
+      `ADD INDEX` to change a data-skipping index in place, and doing that
+      automatically risks silently discarding a built index on a large table
+      without the operator's knowledge. The warning tells you what to run
+      manually.
+
+  Comparison of `expression` is best-effort: ClickHouse normalizes stored
+  expressions (whitespace, sometimes backtick quoting, occasionally constant
+  folding) so it may not match your DSL string byte-for-byte even when they're
+  semantically identical. When in doubt, treat a `type` mismatch as
+  authoritative and double-check `expression` mismatches by hand before acting
+  on them.
+  """
+  @spec alter_indexes_cql(module(), module()) :: {[String.t()], [String.t()]}
+  def alter_indexes_cql(resource, repo) do
+    configured = Dsl.indexes(resource)
+
+    if configured == [] do
+      {[], []}
+    else
+      table_name = AshClickhouse.DataLayer.source(resource)
+      table = Identifier.quote_name(table_name)
+      database = Dsl.database(resource)
+
+      qualified =
+        case database do
+          nil -> table
+          db -> "#{Identifier.quote_name(db)}.#{table}"
+        end
+
+      existing = fetch_existing_indexes(repo, table_name, database)
+
+      {to_add, to_check} =
+        Enum.split_with(configured, fn idx -> not Map.has_key?(existing, to_string(idx.name)) end)
+
+      statements =
+        Enum.map(to_add, fn idx ->
+          "ALTER TABLE #{qualified} ADD INDEX IF NOT EXISTS #{index_definition_cql(idx)}"
+        end)
+
+      warnings =
+        to_check
+        |> Enum.map(fn idx ->
+          index_mismatch_warning(idx, Map.fetch!(existing, to_string(idx.name)), qualified)
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      {statements, warnings}
+    end
+  end
+
+  # Returns %{"index_name" => %{type: "...", expression: "..."}} for indexes
+  # currently present on the table, or %{} if the lookup fails (e.g. system
+  # table unavailable / permissions) — in which case we fall back to treating
+  # every configured index as "unknown", same degrade-gracefully behavior as
+  # `alter_table_cql/2` uses for columns.
+  defp fetch_existing_indexes(repo, table_name, database) do
+    case repo.query(
+           "SELECT name, type, expr FROM system.data_skipping_indices WHERE table = ? AND database = ?",
+           [table_name, database || repo.database() || "default"]
+         ) do
+      {:ok, %ClickHouse.Result{rows: rows}} ->
+        Map.new(rows, fn [name, type, expr] ->
+          {name, %{type: type, expression: expr}}
+        end)
+
+      _ ->
+        %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp index_mismatch_warning(
+         configured,
+         %{type: stored_type, expression: stored_expr},
+         qualified
+       ) do
+    type_mismatch? = normalize(configured.type) != normalize(stored_type)
+    expr_mismatch? = normalize(configured.expression) != normalize(stored_expr)
+
+    cond do
+      type_mismatch? and expr_mismatch? ->
+        """
+        Index #{inspect(configured.name)} on #{qualified} differs from its configuration in BOTH type and expression:
+          configured: TYPE #{configured.type} (#{configured.expression})
+          stored:     TYPE #{stored_type} (#{stored_expr})
+        To apply the configured definition, run manually:
+          ALTER TABLE #{qualified} DROP INDEX #{Identifier.quote_name(configured.name)};
+          ALTER TABLE #{qualified} ADD INDEX #{index_definition_cql(configured)};
+        """
+
+      type_mismatch? ->
+        """
+        Index #{inspect(configured.name)} on #{qualified} has type #{inspect(stored_type)} in ClickHouse \
+        but is configured as #{inspect(configured.type)}. Not auto-corrected — run manually:
+          ALTER TABLE #{qualified} DROP INDEX #{Identifier.quote_name(configured.name)};
+          ALTER TABLE #{qualified} ADD INDEX #{index_definition_cql(configured)};
+        """
+
+      expr_mismatch? ->
+        """
+        Index #{inspect(configured.name)} on #{qualified} has expression #{inspect(stored_expr)} in ClickHouse \
+        but is configured as #{inspect(configured.expression)}. This may be a harmless normalization \
+        difference (whitespace/quoting) rather than a real mismatch — verify before acting. If it's real:
+          ALTER TABLE #{qualified} DROP INDEX #{Identifier.quote_name(configured.name)};
+          ALTER TABLE #{qualified} ADD INDEX #{index_definition_cql(configured)};
+        """
+
+      true ->
+        nil
+    end
+  end
+
+  # Loose normalization so whitespace/case differences between the DSL string
+  # and ClickHouse's stored/echoed form don't produce false-positive warnings.
+  defp normalize(str) when is_binary(str) do
+    str
+    |> String.downcase()
+    |> String.replace(~r/\s+/, "")
+    |> String.trim()
+  end
+
+  defp normalize(other), do: other
 
   @doc """
   Generates all migration statements (table creation) for a list of resources.
