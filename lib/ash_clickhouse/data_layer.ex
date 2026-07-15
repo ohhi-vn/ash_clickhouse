@@ -118,7 +118,6 @@ defmodule AshClickhouse.DataLayer do
   # ============================================================================
 
   @impl Ash.DataLayer
-  def can?(_resource_or_dsl, :offset), do: true
   def can?(_resource_or_dsl, {:combine, _}), do: false
   def can?(_resource_or_dsl, {:join, _}), do: false
   def can?(_resource_or_dsl, {:filter_relationship, _}), do: false
@@ -135,21 +134,20 @@ defmodule AshClickhouse.DataLayer do
       do: true
 
   def can?(_resource_or_dsl, {:query_aggregate, _}), do: false
-  def can?(_resource_or_dsl, {:sort, _}), do: true
+
+  # `:filter_expr` and `{:sort, _}` are supported but not members of
+  # `@supported_features` (the MapSet only contains bare atoms, and `can?/2`
+  # dispatches tuples to the `_other` fallback). They need explicit clauses.
+  # All other supported *atom* features resolve via the `@supported_features`
+  # MapSet fallback below — keeping a single source of truth avoids the two
+  # drifting apart.
   def can?(_resource_or_dsl, {:filter_expr, _}), do: true
-  def can?(_resource_or_dsl, :calculate), do: true
-  def can?(_resource_or_dsl, :action_select), do: true
-  def can?(_resource_or_dsl, :nested_expressions), do: true
-  def can?(_resource_or_dsl, :async_engine), do: true
-  def can?(_resource_or_dsl, :changeset_filter), do: true
-  def can?(_resource_or_dsl, :composite_primary_key), do: true
-  def can?(_resource_or_dsl, :boolean_filter), do: true
-  def can?(_resource_or_dsl, :distinct), do: true
-  def can?(_resource_or_dsl, :update_query), do: true
-  def can?(_resource_or_dsl, :destroy_query), do: true
-  def can?(_resource_or_dsl, :bulk_create), do: true
-  def can?(_resource_or_dsl, :stream), do: true
-  def can?(_resource_or_dsl, :multitenancy), do: true
+  def can?(_resource_or_dsl, {:sort, _}), do: true
+
+  # Explicitly-unsupported features that are *not* members of `@supported_features`.
+  # These must stay as `false` clauses because the MapSet fallback would otherwise
+  # return `false` for them anyway — but listing them keeps intent obvious and
+  # lets us attach a clear `do: false` for each.
   def can?(_resource_or_dsl, :transact), do: false
   def can?(_resource_or_dsl, :lock), do: false
   def can?(_resource_or_dsl, :keyset), do: false
@@ -176,6 +174,15 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec return_query(t(), Ash.Resource.t()) :: {:ok, t()}
   def return_query(data_layer_query, _resource), do: {:ok, data_layer_query}
+
+  @doc """
+  Returns the set of features declared as supported via `@supported_features`.
+
+  Exposed for tests/tooling so the single source of truth for `can?/2` can be
+  inspected without re-listing the features.
+  """
+  @spec supported_features() :: MapSet.t(atom())
+  def supported_features, do: @supported_features
 
   @impl Ash.DataLayer
   @spec resource_to_query(Ash.Resource.t(), Ash.Domain.t()) :: t()
@@ -214,6 +221,7 @@ defmodule AshClickhouse.DataLayer do
   @spec run_query(t(), Ash.Resource.t()) :: {:ok, [Ash.Resource.t()]} | {:error, term()}
   def run_query(data_layer_query, resource) do
     %Query{repo: repo} = data_layer_query
+    repo = if is_nil(repo), do: repo(resource), else: repo
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
 
     opts = build_query_opts(resource)
@@ -300,21 +308,28 @@ defmodule AshClickhouse.DataLayer do
 
     aggregates = Map.get(context, :aggregates, [])
 
-    stream = ClickHouse.stream!(repo, query, params, opts)
+    try do
+      stream = ClickHouse.stream!(repo, query, params, opts)
 
-    Stream.map(stream, fn chunk ->
-      {_columns, rows} = Format.JSONCompactEachRow.decode(chunk)
+      # `ClickHouse.Stream` is itself a lazy Enumerable that yields raw response
+      # chunks as they arrive. We decode each chunk into Ash records and apply
+      # in-memory calculations/aggregates, emitting one record at a time. The
+      # underlying stream is started/advanced/halted by its own Enumerable
+      # implementation, so no manual cleanup is required here.
+      Stream.flat_map(stream, fn chunk ->
+        {_columns, rows} = Format.JSONCompactEachRow.decode(chunk)
 
-      records = Enum.map(rows, &to_ash_record(&1, resource))
-
-      # Mirror `run_query/2`: apply in-memory calculations and attach aggregates
-      # so streaming and non-streaming reads return identical results.
-      records = apply_calculations(records, context)
-      records = attach_aggregates(records, aggregates, resource, repo, opts)
-
-      records
-    end)
-    |> Stream.flat_map(& &1)
+        rows
+        |> Enum.map(&to_ash_record(&1, resource))
+        |> apply_calculations(context)
+        |> attach_aggregates(aggregates, resource, repo, opts)
+      end)
+    rescue
+      e ->
+        # Wrap raw client exceptions the same way every other read path does so
+        # callers get a consistent `AshClickhouse.Error.ClickhouseError`.
+        raise AshClickhouse.Error.wrap_clickhouse_error(e)
+    end
   end
 
   # ============================================================================
@@ -773,8 +788,8 @@ defmodule AshClickhouse.DataLayer do
     database = Dsl.database(resource)
 
     case database do
-      nil -> table
-      db -> "#{Identifier.quote_name(db)}.#{table}"
+      nil -> Identifier.quote_name(table)
+      db -> "#{Identifier.quote_name(db)}.#{Identifier.quote_name(table)}"
     end
   end
 
@@ -784,20 +799,20 @@ defmodule AshClickhouse.DataLayer do
 
   defp do_insert(attrs, resource, repo) do
     qualified = qualified_table(resource)
-    {fields, values} = build_field_value_pairs(attrs, resource)
+    {fields, rows} = build_insert_rows([attrs_to_row(attrs, resource)], resource)
 
-    query =
+    statement =
       IO.iodata_to_binary([
         "INSERT INTO ",
         qualified,
         " (",
         Enum.join(fields, ", "),
-        ") VALUES (",
-        Enum.map_join(1..length(fields), ", ", fn _ -> "?" end),
-        ")"
+        ") FORMAT JSONCompactEachRow"
       ])
 
-    with {:ok, _} <- repo.query(query, values, build_opts(resource)) do
+    insert_opts = build_insert_opts(resource, [])
+
+    with {:ok, _} <- repo.insert_rows(qualified, statement, rows, insert_opts) do
       {:ok, to_ash_record(attrs, resource)}
     end
     |> handle_result()
@@ -1165,19 +1180,6 @@ defmodule AshClickhouse.DataLayer do
   # SQL construction helpers
   # ============================================================================
 
-  defp build_field_value_pairs(attrs, resource) do
-    uuid_fields = Types.uuid_attribute_names(resource)
-    attr_map = attribute_map(resource)
-
-    {fields, values} =
-      Enum.reduce(attrs, {[], []}, fn {k, v}, {fs, vs} ->
-        value = encode_attr_value(k, v, attr_map, uuid_fields)
-        {[Identifier.quote_name(to_string(k)) | fs], [value | vs]}
-      end)
-
-    {Enum.reverse(fields), :lists.reverse(values)}
-  end
-
   defp build_set_clauses(attrs, resource) do
     uuid_fields = Types.uuid_attribute_names(resource)
     attr_map = attribute_map(resource)
@@ -1266,7 +1268,16 @@ defmodule AshClickhouse.DataLayer do
     end)
   end
 
-  defp changeset_to_update_attrs(changeset, _resource), do: changeset.attributes
+  defp changeset_to_update_attrs(changeset, _resource) do
+    # Ash populates `attributes` for directly-built changesets (e.g. from
+    # `DataLayer.update_query` tests) but routes atomic/bulk updates through
+    # `changeset.changes`. Merge both so the SET clause is built regardless of
+    # which path produced the changeset. Plain maps (no `:changes` key) are
+    # returned as-is.
+    attributes = Map.get(changeset, :attributes, %{})
+    changes = Map.get(changeset, :changes, %{})
+    Map.merge(attributes, changes)
+  end
 
   defp autogenerate_value(attr) do
     cond do
@@ -1354,6 +1365,30 @@ defmodule AshClickhouse.DataLayer do
   # numeric string. ClickHouse parses the JSON number on insert, so the value is
   # stored with full precision. If your JSON encoder has a native Decimal
   # implementation you may remove this branch.
+  defp encode_bulk_value(%DateTime{} = value, _name, _resource) do
+    # ClickHouse's JSONCompactEachRow expects DateTime values as a unix integer
+    # (seconds), not a quoted string. DateTime64(N) interprets the integer as
+    # whole seconds with zero fractional precision.
+    DateTime.to_unix(value, :second)
+  end
+
+  defp encode_bulk_value(%NaiveDateTime{} = value, _name, _resource) do
+    value
+    |> DateTime.from_naive("Etc/UTC")
+    |> case do
+      {:ok, dt} -> DateTime.to_unix(dt, :second)
+      _ -> value
+    end
+  end
+
+  defp encode_bulk_value(%Date{} = value, _name, _resource) do
+    Date.to_erl(value) |> :calendar.date_to_gregorian_days()
+  end
+
+  defp encode_bulk_value(%Time{} = value, _name, _resource) do
+    Time.to_erl(value) |> (fn {h, m, s} -> h * 3600 + m * 60 + s end).()
+  end
+
   defp encode_bulk_value(%Decimal{} = value, _name, _resource) do
     Decimal.to_string(value, :normal)
   end

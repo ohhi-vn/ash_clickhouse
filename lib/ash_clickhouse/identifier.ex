@@ -63,12 +63,7 @@ defmodule AshClickhouse.Identifier do
   def valid_identifier?(name) when is_atom(name), do: valid_identifier?(to_string(name))
 
   def valid_identifier?(name) when is_binary(name) do
-    case String.first(name) do
-      nil -> false
-      <<first::utf8>> -> first in ?a..?z or first in ?A..?Z or first == ?_
-      _ -> false
-    end and
-      String.match?(name, ~r/^[a-zA-Z_][a-zA-Z0-9_]*$/)
+    String.match?(name, ~r/^[a-zA-Z_][a-zA-Z0-9_]*$/)
   end
 
   @doc """

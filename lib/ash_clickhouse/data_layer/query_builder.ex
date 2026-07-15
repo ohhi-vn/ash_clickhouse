@@ -56,8 +56,14 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
 
     select_clause =
       case {distinct, select} do
-        {cols, _} when is_list(cols) and cols != [] ->
-          "DISTINCT " <> Enum.map_join(cols, ", ", &Identifier.quote_name/1)
+        {cols, select} when is_list(cols) and cols != [] ->
+          # ClickHouse dedupes on the full selected row, so we emit the merged
+          # select list (which `distinct/3` already unions with the distinct
+          # columns) rather than only the distinct columns — otherwise an
+          # explicit `select` would silently lose columns. When there is no
+          # explicit select, fall back to the distinct columns.
+          merged = if select && select != [], do: select, else: cols
+          "DISTINCT " <> Enum.map_join(merged, ", ", &Identifier.quote_name/1)
 
         {_, cols} when is_list(cols) and cols != [] ->
           Enum.map_join(cols, ", ", &Identifier.quote_name/1)
@@ -74,6 +80,10 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
           Enum.map_join(sorts, ", ", fn
             {field, :asc} -> "#{Identifier.quote_name(field)} ASC"
             {field, :desc} -> "#{Identifier.quote_name(field)} DESC"
+            {field, :asc_nils_first} -> "#{Identifier.quote_name(field)} ASC NULLS FIRST"
+            {field, :asc_nils_last} -> "#{Identifier.quote_name(field)} ASC NULLS LAST"
+            {field, :desc_nils_first} -> "#{Identifier.quote_name(field)} DESC NULLS FIRST"
+            {field, :desc_nils_last} -> "#{Identifier.quote_name(field)} DESC NULLS LAST"
             field when is_atom(field) -> "#{Identifier.quote_name(field)} ASC"
           end)
       end
@@ -366,6 +376,11 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
 
   defp collect_columns(%{op: :or, left: left, right: right}) do
     collect_columns(left) ++ collect_columns(right)
+  end
+
+  defp collect_columns(%Ash.Query.BooleanExpression{op: :not, left: left, right: right}) do
+    child = if right != nil, do: right, else: left
+    collect_columns(child)
   end
 
   defp collect_columns(%Ash.Query.Not{expression: expression}) do

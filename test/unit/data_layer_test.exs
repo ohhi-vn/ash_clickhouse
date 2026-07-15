@@ -33,9 +33,9 @@ defmodule AshClickhouse.DataLayerTest do
   end
 
   describe "qualified_table/1" do
-    test "builds a qualified table name for a resource" do
+    test "builds a qualified, backtick-quoted table name for a resource" do
       assert DataLayer.qualified_table(AshClickhouse.TestResource) ==
-               "`ash_clickhouse_test`.test_users"
+               "`ash_clickhouse_test`.`test_users`"
     end
   end
 

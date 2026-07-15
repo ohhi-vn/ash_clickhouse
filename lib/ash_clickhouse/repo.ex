@@ -35,6 +35,7 @@ defmodule AshClickhouse.Repo do
       @impl AshClickhouse.Repo
       def child_spec(opts) do
         conn_opts = AshClickhouse.Repo.config_to_conn_opts(__MODULE__)
+        conn_opts = Keyword.merge(conn_opts, opts)
         {name, conn_opts} = Keyword.pop(conn_opts, :name, __MODULE__)
         AshClickhouse.Connection.child_spec([name: name] ++ conn_opts)
       end
@@ -98,7 +99,7 @@ defmodule AshClickhouse.Repo do
       @impl AshClickhouse.Repo
       @spec create_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
       def create_database(database_name \\ nil) do
-        database = database_name || database()
+        database = database_name || database() || "default"
         AshClickhouse.Identifier.validate_database!(database)
 
         query =
@@ -111,7 +112,7 @@ defmodule AshClickhouse.Repo do
       @impl AshClickhouse.Repo
       @spec drop_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
       def drop_database(database_name \\ nil) do
-        database = database_name || database()
+        database = database_name || database() || "default"
         AshClickhouse.Identifier.validate_database!(database)
 
         query = "DROP DATABASE IF EXISTS #{AshClickhouse.Identifier.quote_name(database)}"

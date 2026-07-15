@@ -122,7 +122,7 @@ defmodule AshClickhouse.MixProject do
       {:telemetry, "~> 1.0"},
       {:jason, "~> 1.0", optional: true},
       {:decimal, "~> 3.1", optional: true},
-      {:testcontainer_ex, "== 0.7.2", only: [:test], runtime: false},
+      {:testcontainer_ex, "== 0.7.2", only: [:test]},
 
       # Dev / docs
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},

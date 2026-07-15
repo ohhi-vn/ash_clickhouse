@@ -139,6 +139,8 @@ defmodule AshClickhouse.Migration do
     case Types.resolve_attr_type(attr) do
       "String" -> "'#{escape_default(value)}'"
       "UUID" -> "'#{escape_default(value)}'"
+      "DateTime64(6)" -> "'#{escape_default(value)}'"
+      "Date" -> "'#{escape_default(value)}'"
       type -> inspect_numeric_default(value, type)
     end
   end
@@ -149,6 +151,13 @@ defmodule AshClickhouse.Migration do
   # validate it is numeric before emitting it.
   defp inspect_numeric_default(value, _type) when is_integer(value), do: to_string(value)
   defp inspect_numeric_default(value, _type) when is_float(value), do: to_string(value)
+
+  defp inspect_numeric_default(value, _type) when is_boolean(value),
+    do: if(value, do: "1", else: "0")
+
+  defp inspect_numeric_default(%Decimal{} = value, _type), do: to_string(value)
+  defp inspect_numeric_default(%Date{} = value, _type), do: "'#{Date.to_iso8601(value)}'"
+  defp inspect_numeric_default(%DateTime{} = value, _type), do: "'#{DateTime.to_iso8601(value)}'"
 
   defp inspect_numeric_default(value, type) when is_binary(value) do
     case Float.parse(value) do
@@ -165,8 +174,8 @@ defmodule AshClickhouse.Migration do
 
   defp inspect_numeric_default(value, type) do
     raise AshClickhouse.Error.ConfigurationError, """
-    Non-numeric default #{inspect(value)} is not valid for column type #{type}.
-    Defaults for numeric columns must be numbers.
+    Unsupported default #{inspect(value)} for column type #{type}.
+    Supported default literals are numbers, booleans, %Date{}, %DateTime{}, %Decimal{}, or a numeric string.
     """
   end
 

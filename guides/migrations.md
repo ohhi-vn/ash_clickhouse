@@ -14,7 +14,8 @@ mix ash_clickhouse.migrate  # CREATE TABLE (+ ALTER) for each resource
 ```
 
 `mix ash_clickhouse.setup` iterates over all `AshClickhouse.Repo` modules and
-calls `create_database/0`.
+calls `create_database/0`. If a repo has no `:database` configured, it targets
+ClickHouse's `default` database rather than a database literally named `nil`.
 
 `mix ash_clickhouse.migrate` iterates over all resources that export
 `__ash_clickhouse__/1`, filters by `migrate?/1` and matching `repo/1`, then:
@@ -23,7 +24,11 @@ calls `create_database/0`.
 2. Runs `Migration.alter_table_cql/2` (schema evolution for existing tables)
 3. Runs `Migration.alter_indexes_cql/2` (adds missing data-skipping indexes)
 
-Resources with `migrate false` are skipped.
+Resources with `migrate false` are skipped. A resource whose `clickhouse` block
+forgets `repo` is **skipped with an error** (rather than being migrated into
+every configured database), and a resource that raises during DDL generation
+(e.g. an invalid default) is reported and skipped so a single bad resource does
+not abort the whole run.
 
 ## Generated `CREATE TABLE`
 
@@ -81,7 +86,9 @@ end
 for new tables, and issues `ALTER TABLE ... ADD INDEX IF NOT EXISTS` for
 existing tables that lack them. Index `type` is validated against a whitelist
 (`minmax`, `set`, `bloom_filter`, `ngrambf_v1`, `tokenbf_v1`) at compile time,
-so a typo fails at compile rather than at migrate.
+so a typo fails at compile rather than at migrate. Index **names must be
+unique** within a resource — declaring two indexes with the same `name:` raises
+a compile-time `ArgumentError`.
 
 Indexes are **additive only**. Changing an existing index's `type` or
 `expression` is *not* auto-applied — `ADD INDEX IF NOT EXISTS` no-ops on a name

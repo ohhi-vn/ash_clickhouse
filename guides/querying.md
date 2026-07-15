@@ -122,13 +122,42 @@ Mutations run asynchronously by default; control this with the resource's
 `mutations_sync` option (`1` = wait on current replica, `2` = wait on all
 replicas, `nil` = async).
 
-## Calculations
+## String matching: `contains` vs `starts_with`/`ends_with`
 
-Calculations are computed in memory after fetching rows.
+`contains` is **case-insensitive** (it uses ClickHouse's `positionCaseInsensitive`),
+while `starts_with` and `ends_with` are **case-sensitive** (they use `LIKE`). This
+asymmetry is deliberate — `positionCaseInsensitive` treats `%`/`_` literally so it
+can't be used for prefix/suffix matching — but it's easy to trip over when switching
+between the three:
+
+```elixir
+# case-insensitive substring search
+MyApp.User |> Ash.Query.filter(contains(name, "john")) |> Ash.read!()
+
+# case-sensitive prefix / suffix
+MyApp.User |> Ash.Query.filter(starts_with(name, "John")) |> Ash.read!()
+MyApp.User |> Ash.Query.filter(ends_with(name, "@example.com")) |> Ash.read!()
+```
 
 ## Streaming
 
 `stream` is supported and yields rows from the result set.
+
+## Returned records are locally reconstructed
+
+`create`/`update`/`bulk_create` return records built from the values you submitted
+rather than re-querying ClickHouse. ClickHouse has no `RETURNING` clause, so any
+**server-computed** column (e.g. a default value, an auto-incrementing counter, or a
+`DEFAULT now()` timestamp) will *not* appear in the returned struct. If you need the
+server-computed value, read the row back explicitly.
+
+## Bulk create: no cross-chunk rollback
+
+`bulk_create` splits rows into chunks (default 1000, max 100_000) and inserts each
+chunk with a separate statement. ClickHouse has no transactions, so if a later chunk
+fails, earlier chunks are already committed and are **not** rolled back. Design
+callers to tolerate partial success (or keep batches small enough to be atomic for
+your tolerance).
 
 ## Multitenancy in queries
 

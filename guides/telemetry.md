@@ -23,6 +23,10 @@ Each event carries the following metadata:
 - `:resource` — the Ash resource (or `nil`)
 - `:query` — the SQL query string
 - `:event` — the event atom (e.g. `:run_query`)
+- `:status` — `:ok` or `:error` on the `:stop` event. This distinguishes a
+  successful query from one that returned `{:error, _}`. (Errors that are
+  *raised* by the ClickHouse client are reported via the `:exception` event
+  instead, so they do not appear as `:stop` with `status: :error`.)
 
 The `:stop` and `:exception` events also include the result/error in the
 standard `:telemetry.span/3` measurement and result tuples.

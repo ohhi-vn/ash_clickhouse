@@ -110,5 +110,9 @@ defmodule AshClickhouse.TestBulkResource do
     create :create do
       accept([:name, :email, :age])
     end
+
+    update :update do
+      accept([:name, :email, :age])
+    end
   end
 end

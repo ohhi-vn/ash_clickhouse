@@ -27,7 +27,9 @@ clickhouse do
   settings "index_granularity = 8192"
 
   # Data-skipping indexes (ClickHouse has no B-tree indexes). May be repeated;
-  # `granularity` defaults to 1.
+  # `granularity` defaults to 1. Keys may be given in any order, and index
+  # *names must be unique* within a resource (a duplicate `name:` raises at
+  # compile time).
   index name: :idx_user_id, expression: "user_id", type: "bloom_filter"
   index name: :idx_created_at, expression: "created_at", type: "minmax", granularity: 4
 
@@ -58,7 +60,7 @@ getters, so a resource can define a local helper named like a DSL key (e.g.
 | `default_context` | `map()` | — | Context merged into every query/changeset |
 | `description` | `String.t()` | — | Human-readable description |
 | `migrate` | `boolean()` | `true` | Whether to include in migrations |
-| `index` | `{name:, expression:, type:}` / `{name:, expression:, type:, granularity:}` | — | Repeatable; declares a data-skipping index |
+| `index` | `{name:, expression:, type:}` / `{name:, expression:, type:, granularity:}` | — | Repeatable; declares a data-skipping index. Keys may be in any order; `name:` must be unique within the resource |
 | `insert_opts` | `keyword()` | `[]` | Options applied to bulk inserts |
 | `mutations_sync` | `nil \| 1 \| 2` | `nil` | Default `mutations_sync` for ALTER mutations |
 

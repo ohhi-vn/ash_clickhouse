@@ -62,11 +62,7 @@ defmodule AshClickhouse.DataLayer.Dsl do
 
   defp get_config(resource, key, default \\ nil) do
     if function_exported?(resource, :__ash_clickhouse__, 1) do
-      try do
-        resource.__ash_clickhouse__(key)
-      rescue
-        FunctionClauseError -> default
-      end
+      resource.__ash_clickhouse__(key)
     else
       default
     end

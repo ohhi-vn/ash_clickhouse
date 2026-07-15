@@ -128,7 +128,7 @@ defmodule AshClickhouse.QueryBuilderComplexTest do
         )
 
       assert sql ==
-               "SELECT DISTINCT `status` FROM `app`.`users` WHERE `status` = ? AND `age` >= ? GROUP BY `status` ORDER BY `age` DESC, `status` ASC LIMIT 20 OFFSET 10"
+               "SELECT DISTINCT `status`, `age` FROM `app`.`users` WHERE `status` = ? AND `age` >= ? GROUP BY `status` ORDER BY `age` DESC, `status` ASC LIMIT 20 OFFSET 10"
 
       assert params == ["active", 18]
     end

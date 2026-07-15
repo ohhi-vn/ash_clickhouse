@@ -379,9 +379,14 @@ defmodule AshClickhouse.DataLayer.Types do
   """
   @spec convert_uuid_param(term(), term(), MapSet.t()) :: term()
   def convert_uuid_param(value, column, uuid_fields) do
-    if column in uuid_fields and is_binary(value) and byte_size(value) == 36 do
-      case uuid_string_to_binary(value) do
-        {:ok, bin} -> bin
+    # UUID values are passed to ClickHouse as `?` parameters and encoded by the
+    # client's `DataType.encode`, which wraps binaries in single quotes and
+    # emits the raw bytes — ClickHouse cannot parse that as a UUID. Keeping the
+    # canonical 36-character string form lets the client emit a valid quoted
+    # UUID literal that ClickHouse accepts.
+    if column in uuid_fields and is_binary(value) and byte_size(value) == 16 do
+      case uuid_binary_to_string(value) do
+        {:ok, str} -> str
         _ -> value
       end
     else

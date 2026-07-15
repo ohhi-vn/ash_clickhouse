@@ -14,6 +14,54 @@
 
 ### Bug fixes
 
+- **`create_database/1` / `drop_database/1` no longer target a database named
+  `nil`.** When a repo has no `:database` configured, these now fall back to
+  ClickHouse's `default` database (matching `alter_table_cql/2`),
+  so `mix ash_clickhouse.setup` no longer creates a literal `nil` database.
+- **`Repo.child_spec/1` now honors its `opts` argument.** Options passed via
+  the supervision tree (e.g. `{MyApp.Repo, url: "...", pool_size: 7}`) are
+  merged into the connection options instead of being silently dropped.
+- **`run_query/2` now guards against a missing repo.** A resource whose
+  `clickhouse` block forgets `repo` raises a clear `ConfigurationError` instead
+  of failing with `UndefinedFunctionError: function nil.query/3 is undefined`.
+- **`distinct` + explicit `select` no longer silently drops columns.**
+  `build_optimized_query/1` now emits the merged select list under `DISTINCT`
+  (ClickHouse dedupes on the full row) rather than only the distinct columns.
+- **Sort building now supports Ash's nulls-ordering directions**
+  (`:asc_nils_first`, `:asc_nils_last`, `:desc_nils_first`, `:desc_nils_last`),
+  emitting `NULLS FIRST` / `NULLS LAST`. Previously these raised
+  `FunctionClauseError`.
+- **The `index` DSL macro is now robust to key order.** It matches any keyword
+  list and pulls `name`/`expression`/`type` with `Keyword.get`, raising a clear
+  error if any required key is missing (instead of a cryptic "undefined
+  function index/1" when keys were reordered). Duplicate index names now raise
+  a compile-time `ArgumentError`.
+- **`mix ash_clickhouse.migrate` is more resilient.** A single resource that
+  raises during DDL generation no longer aborts the whole run, and a resource
+  that forgets `repo` is skipped with an error instead of being migrated into
+  every configured database.
+- **Migration defaults support booleans, dates, datetimes, and `Decimal`
+  structs.** These now emit correct literals instead of a misleading
+  "Non-numeric default" error. Other unsupported default shapes raise a clearer
+  "Unsupported default" message.
+- **`stream/3` now wraps raw client exceptions** in
+  `AshClickhouse.Error.ClickhouseError`, matching every other read path.
+- **`qualified_table/1` (writes) now backtick-quotes the table name** like the
+  read path, so a reserved-word table name behaves consistently across reads
+  and writes.
+- **`can?/2` now has a single source of truth.** The 26 redundant per-atom
+  clauses that duplicated the `@supported_features` MapSet were removed; only
+  the genuinely special cases (aggregates, joins, `:filter_expr`, and the
+  explicit `false` clauses) remain.
+- **`Dsl.get_config/3` no longer rescues an unreachable `FunctionClauseError`.**
+- **`Identifier.valid_identifier?/1` is now just the regex** (the manual
+  first-character check was redundant).
+- **`collect_columns/1` now handles `:not` expressions** (both
+  `%Ash.Query.BooleanExpression{op: :not}` and `%Ash.Query.Not{}`), matching
+  `build_predicate/1`.
+
+### Improvements
+
 - **UUID heuristic no longer corrupts non-UUID string data.** Parameters are
   now converted to the 16-byte UUID binary form only when the column is
   provably UUID-typed (via `Dsl.uuid_attribute_names/1`), instead of whenever a

@@ -85,11 +85,20 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
         {:mutations_sync, meta, [value]} ->
           set(meta, :__set_mutations_sync__, value)
 
-        {:index, meta, [[name: name, expression: expr, type: type]]} ->
-          add_index(meta, name, expr, type, 1)
+        {:index, meta, [opts]} when is_list(opts) ->
+          name = Keyword.get(opts, :name)
+          expression = Keyword.get(opts, :expression)
+          type = Keyword.get(opts, :type)
+          granularity = Keyword.get(opts, :granularity, 1)
 
-        {:index, meta, [[name: name, expression: expr, type: type, granularity: gran]]} ->
-          add_index(meta, name, expr, type, gran)
+          unless name && expression && type do
+            raise ArgumentError, """
+            Invalid ClickHouse index declaration. `index` requires at least
+            `name:`, `expression:`, and `type:`. Got: #{inspect(opts)}.
+            """
+          end
+
+          add_index(meta, name, expression, type, granularity)
 
         other ->
           other
@@ -150,33 +159,35 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
   # --- setters (called at compile time) ------------------------------------
 
   @doc false
-  def __set_table__(module, value), do: Module.put_attribute(module, :ash_clickhouse_table, value)
+  def __set_table__(module, value) when is_binary(value),
+    do: Module.put_attribute(module, :ash_clickhouse_table, value)
 
   @doc false
-  def __set_repo__(module, value), do: Module.put_attribute(module, :ash_clickhouse_repo, value)
+  def __set_repo__(module, value) when is_atom(value),
+    do: Module.put_attribute(module, :ash_clickhouse_repo, value)
 
   @doc false
-  def __set_database__(module, value),
+  def __set_database__(module, value) when is_binary(value),
     do: Module.put_attribute(module, :ash_clickhouse_database, value)
 
   @doc false
-  def __set_engine__(module, value),
+  def __set_engine__(module, value) when is_binary(value),
     do: Module.put_attribute(module, :ash_clickhouse_engine, value)
 
   @doc false
-  def __set_order_by__(module, value),
+  def __set_order_by__(module, value) when is_binary(value),
     do: Module.put_attribute(module, :ash_clickhouse_order_by, value)
 
   @doc false
-  def __set_partition_by__(module, value),
+  def __set_partition_by__(module, value) when is_binary(value),
     do: Module.put_attribute(module, :ash_clickhouse_partition_by, value)
 
   @doc false
-  def __set_primary_key__(module, value),
+  def __set_primary_key__(module, value) when is_list(value),
     do: Module.put_attribute(module, :ash_clickhouse_primary_key, value)
 
   @doc false
-  def __set_settings__(module, value),
+  def __set_settings__(module, value) when is_binary(value),
     do: Module.put_attribute(module, :ash_clickhouse_settings, value)
 
   @doc false
@@ -212,6 +223,13 @@ defmodule AshClickhouse.DataLayer.Dsl.Macros do
     end
 
     existing = Module.get_attribute(module, :ash_clickhouse_indexes) || []
+
+    if Enum.any?(existing, fn idx -> idx.name == name end) do
+      raise ArgumentError, """
+      Duplicate ClickHouse index name: #{inspect(name)}.
+      Index names must be unique within a resource.
+      """
+    end
 
     Module.put_attribute(
       module,

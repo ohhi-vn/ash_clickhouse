@@ -342,6 +342,204 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
     end
   end
 
+  # ── Round-trip (create / read / update / destroy) ─────────────────────────────
+
+  describe "round-trip via data layer" do
+    test "create then read returns the inserted record", context do
+      :ok = skip_unless_connected(context)
+
+      changeset =
+        TestResource
+        |> Ash.Changeset.for_create(:create, %{
+          name: "alice",
+          email: "alice@example.com",
+          age: 30
+        })
+
+      assert {:ok, created} = AshClickhouse.DataLayer.create(TestResource, changeset)
+
+      assert created.name == "alice"
+      assert created.email == "alice@example.com"
+      assert created.age == 30
+      refute is_nil(created.id)
+      refute is_nil(created.inserted_at)
+
+      # Read it back through the data layer and confirm a full round-trip.
+      assert [%AshClickhouse.TestResource{} = read] =
+               TestResource
+               |> Ash.Query.for_read(:read)
+               |> Ash.Query.filter(id == ^created.id)
+               |> Ash.read!()
+
+      assert read.id == created.id
+      assert read.name == "alice"
+      assert read.email == "alice@example.com"
+      assert read.age == 30
+    end
+
+    test "update then read reflects the mutation", context do
+      :ok = skip_unless_connected(context)
+
+      {:ok, created} =
+        TestResource
+        |> Ash.Changeset.for_create(:create, %{
+          name: "bob",
+          email: "bob@example.com",
+          age: 25
+        })
+        |> then(&AshClickhouse.DataLayer.create(TestResource, &1))
+
+      # Build an update changeset and apply it through the data layer.
+      update_changeset =
+        created
+        |> Ash.Changeset.for_update(:update, %{name: "bob_updated", age: 26})
+
+      assert {:ok, updated} =
+               AshClickhouse.DataLayer.update(TestResource, update_changeset)
+
+      assert updated.name == "bob_updated"
+      assert updated.age == 26
+
+      assert [read] =
+               TestResource
+               |> Ash.Query.for_read(:read)
+               |> Ash.Query.filter(id == ^created.id)
+               |> Ash.read!()
+
+      assert read.name == "bob_updated"
+      assert read.age == 26
+      assert read.email == "bob@example.com"
+    end
+
+    test "destroy then read returns no record", context do
+      :ok = skip_unless_connected(context)
+
+      {:ok, created} =
+        TestResource
+        |> Ash.Changeset.for_create(:create, %{
+          name: "carol",
+          email: "carol@example.com",
+          age: 40
+        })
+        |> then(&AshClickhouse.DataLayer.create(TestResource, &1))
+
+      destroy_changeset = Ash.Changeset.for_destroy(created, :destroy)
+
+      assert :ok = AshClickhouse.DataLayer.destroy(TestResource, destroy_changeset)
+
+      assert [] =
+               TestResource
+               |> Ash.Query.for_read(:read)
+               |> Ash.Query.filter(id == ^created.id)
+               |> Ash.read!()
+    end
+
+    test "multiple creates then filtered read round-trips each row", context do
+      :ok = skip_unless_connected(context)
+
+      created =
+        for i <- 1..10 do
+          {:ok, rec} =
+            TestResource
+            |> Ash.Changeset.for_create(:create, %{
+              name: "rt_#{i}",
+              email: "rt_#{i}@example.com",
+              age: i * 10
+            })
+            |> then(&AshClickhouse.DataLayer.create(TestResource, &1))
+
+          rec
+        end
+
+      ids = MapSet.new(created, & &1.id)
+      assert MapSet.size(ids) == 10
+
+      adults =
+        TestResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(age >= 50)
+        |> Ash.read!()
+
+      assert length(adults) == 5
+      assert Enum.all?(adults, &MapSet.member?(ids, &1.id))
+      assert Enum.all?(adults, &(&1.age >= 50))
+    end
+  end
+
+  describe "round-trip via bulk_create" do
+    test "bulk insert then read/filter/update/destroy cycle", context do
+      :ok = skip_unless_connected(context)
+
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_users", [])
+      TestRepo.query!(AshClickhouse.Migration.create_table_cql(AshClickhouse.TestBulkResource), [])
+
+      changesets =
+        for i <- 1..20 do
+          AshClickhouse.TestBulkResource
+          |> Ash.Changeset.for_create(:create, %{
+            name: "bu_#{i}",
+            email: "bu_#{i}@example.com",
+            age: i
+          })
+        end
+
+      assert {:ok, _stream} =
+               AshClickhouse.DataLayer.bulk_create(AshClickhouse.TestBulkResource, changesets, [])
+
+      # Read all back.
+      assert 20 = AshClickhouse.TestBulkResource |> Ash.read!() |> length()
+
+      # Filter round-trip.
+      even =
+        AshClickhouse.TestBulkResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(age > 10)
+        |> Ash.read!()
+
+      assert length(even) == 10
+      assert Enum.all?(even, &(&1.age > 10))
+
+      # Update a subset via the data layer's update_query.
+      target = hd(even)
+
+      ash_query =
+        AshClickhouse.TestBulkResource
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.filter(id == ^target.id)
+
+      dl_query =
+        AshClickhouse.DataLayer.resource_to_query(AshClickhouse.TestBulkResource, AshClickhouse.TestDomain)
+
+      {:ok, dl_query} =
+        AshClickhouse.DataLayer.filter(dl_query, ash_query.filter, AshClickhouse.TestBulkResource)
+
+      changeset =
+        target
+        |> Ash.Changeset.for_update(:update, %{name: "renamed"})
+
+      assert {:ok, [_]} =
+               AshClickhouse.DataLayer.update_query(dl_query, changeset, [], AshClickhouse.TestBulkResource)
+
+      assert [%AshClickhouse.TestBulkResource{name: "renamed"}] =
+               AshClickhouse.TestBulkResource
+               |> Ash.Query.for_read(:read)
+               |> Ash.Query.filter(id == ^target.id)
+               |> Ash.read!()
+
+      # Destroy the subset via the data layer's destroy_query.
+      assert :ok =
+               AshClickhouse.DataLayer.destroy_query(dl_query, changeset, [], AshClickhouse.TestBulkResource)
+
+      assert [] =
+               AshClickhouse.TestBulkResource
+               |> Ash.Query.for_read(:read)
+               |> Ash.Query.filter(id == ^target.id)
+               |> Ash.read!()
+    after
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_users", [])
+    end
+  end
+
   # ── Error handling ─────────────────────────────────────────────────────────────
 
   describe "error handling" do
