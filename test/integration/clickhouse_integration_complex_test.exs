@@ -471,7 +471,11 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
       :ok = skip_unless_connected(context)
 
       TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_users", [])
-      TestRepo.query!(AshClickhouse.Migration.create_table_cql(AshClickhouse.TestBulkResource), [])
+
+      TestRepo.query!(
+        AshClickhouse.Migration.create_table_cql(AshClickhouse.TestBulkResource),
+        []
+      )
 
       changesets =
         for i <- 1..20 do
@@ -508,7 +512,10 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
         |> Ash.Query.filter(id == ^target.id)
 
       dl_query =
-        AshClickhouse.DataLayer.resource_to_query(AshClickhouse.TestBulkResource, AshClickhouse.TestDomain)
+        AshClickhouse.DataLayer.resource_to_query(
+          AshClickhouse.TestBulkResource,
+          AshClickhouse.TestDomain
+        )
 
       {:ok, dl_query} =
         AshClickhouse.DataLayer.filter(dl_query, ash_query.filter, AshClickhouse.TestBulkResource)
@@ -518,7 +525,12 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
         |> Ash.Changeset.for_update(:update, %{name: "renamed"})
 
       assert {:ok, [_]} =
-               AshClickhouse.DataLayer.update_query(dl_query, changeset, [], AshClickhouse.TestBulkResource)
+               AshClickhouse.DataLayer.update_query(
+                 dl_query,
+                 changeset,
+                 [],
+                 AshClickhouse.TestBulkResource
+               )
 
       assert [%AshClickhouse.TestBulkResource{name: "renamed"}] =
                AshClickhouse.TestBulkResource
@@ -528,7 +540,12 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
 
       # Destroy the subset via the data layer's destroy_query.
       assert :ok =
-               AshClickhouse.DataLayer.destroy_query(dl_query, changeset, [], AshClickhouse.TestBulkResource)
+               AshClickhouse.DataLayer.destroy_query(
+                 dl_query,
+                 changeset,
+                 [],
+                 AshClickhouse.TestBulkResource
+               )
 
       assert [] =
                AshClickhouse.TestBulkResource

@@ -72,13 +72,15 @@ MyApp.User
 Native aggregates: `count`, `sum`, `avg`, `min`, `max`.
 
 ```elixir
-# Aggregate on a query
+# Aggregate on a query (name, kind, field)
 MyApp.User
-|> Ash.Query.aggregate(:count, :id, :total)
+|> Ash.Query.aggregate(:total, :count, :id)
 |> Ash.read!()
 
 # Aggregate defined on the resource
-Ash.read!(MyApp.User, query: [aggregate: :total_count])
+MyApp.User
+|> Ash.Query.load(:total_count)
+|> Ash.read!()
 ```
 
 Relationship aggregates (attached to each record on read) support `belongs_to`,
@@ -95,8 +97,8 @@ aggregate's `default_value`.
 
 ```elixir
 Ash.bulk_create!(
-  MyApp.User,
   [%{name: "A"}, %{name: "B"}],
+  MyApp.User,
   :create
 )
 ```
@@ -106,16 +108,20 @@ max 100_000). Per-resource `insert_opts` (e.g. `async_insert: 1`) are applied.
 
 ## Update / destroy queries
 
-These map to ClickHouse `ALTER TABLE ... UPDATE` / `DELETE` mutations:
+These map to ClickHouse `ALTER TABLE ... UPDATE` / `DELETE` mutations. They are
+triggered by Ash's bulk update/destroy actions when run against a filtered
+query, and ClickHouse applies the change in a single pass:
 
 ```elixir
+# Zero a negative age in one ALTER TABLE ... UPDATE
 MyApp.User
 |> Ash.Query.filter(age < 0)
-|> Ash.update_query!(set: [age: 0])
+|> Ash.bulk_update(:update, %{age: 0})
 
+# Delete all status = "deleted" rows
 MyApp.User
 |> Ash.Query.filter(status: "deleted")
-|> Ash.destroy_query!()
+|> Ash.bulk_destroy(:destroy, %{})
 ```
 
 Mutations run asynchronously by default; control this with the resource's
@@ -141,7 +147,19 @@ MyApp.User |> Ash.Query.filter(ends_with(name, "@example.com")) |> Ash.read!()
 
 ## Streaming
 
-`stream` is supported and yields rows from the result set.
+`stream` is supported and yields rows from the result set without
+materializing the full query into memory — the natural choice for large OLAP
+scans. Decoded records are emitted one at a time:
+
+```elixir
+MyApp.User
+|> Ash.Query.filter(age > 18)
+|> Ash.stream!()
+|> Enum.take(10_000)
+```
+
+In-memory calculations and relationship aggregates are applied per chunk, so
+streaming returns the same records as `Ash.read!/2`.
 
 ## Returned records are locally reconstructed
 
@@ -161,6 +179,6 @@ your tolerance).
 
 ## Multitenancy in queries
 
-See [Multitenancy](multitenancy.md). Tenant is set via
-`Ash.Query.set_tenant/2` and applied as a database qualifier or a filter
-depending on the strategy.
+See [Multitenancy](multitenancy.md). Tenant is set via `Ash.Query.set_tenant/2`
+and applied as a filter (attribute strategy) or stored on the query for
+context-based scoping.

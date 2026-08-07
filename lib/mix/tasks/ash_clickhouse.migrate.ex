@@ -3,82 +3,18 @@ defmodule Mix.Tasks.AshClickhouse.Migrate do
   Creates ClickHouse tables for all AshClickhouse resources.
 
       mix ash_clickhouse.migrate
+
+  This is equivalent to running `mix ash.migrate` and delegates to
+  `AshClickhouse.DataLayer.Extension.migrate/1`.
   """
 
   use Mix.Task
 
-  alias AshClickhouse.DataLayer.Dsl
-  alias AshClickhouse.Migration
+  alias AshClickhouse.DataLayer.Extension
 
   @impl Mix.Task
   def run(_args) do
     Mix.Task.run("compile")
-    repos = find_repos()
-
-    Enum.each(repos, fn repo ->
-      resources = find_resources()
-
-      Enum.each(resources, fn resource ->
-        resource_repo = Dsl.repo(resource)
-
-        if is_nil(resource_repo) do
-          Mix.shell().error(
-            "Skipping #{inspect(resource)}: no repo configured (add `repo MyApp.Repo` to its clickhouse block)."
-          )
-        else
-          if resource_repo == repo and Dsl.migrate?(resource) do
-            try do
-              create_statements = Migration.generate_resource_cql(resource)
-              run_statements(repo, create_statements, "Migrated", resource)
-
-              alter_statements = Migration.alter_table_cql(resource, repo)
-              run_statements(repo, alter_statements, "Altered", resource)
-
-              {index_statements, index_warnings} = Migration.alter_indexes_cql(resource, repo)
-              run_statements(repo, index_statements, "Added index for", resource)
-
-              Enum.each(index_warnings, fn warning ->
-                Mix.shell().error(warning)
-              end)
-            rescue
-              e ->
-                Mix.shell().error(
-                  "Failed to generate migration for #{inspect(resource)}: #{Exception.message(e)}"
-                )
-            end
-          end
-        end
-      end)
-    end)
-  end
-
-  defp run_statements(repo, statements, verb, resource) do
-    Enum.each(statements, fn statement ->
-      case repo.query(statement, []) do
-        {:ok, _} ->
-          Mix.shell().info("#{verb} #{inspect(resource)}")
-
-        {:error, reason} ->
-          Mix.shell().error(
-            "Failed to #{String.downcase(verb)} #{inspect(resource)}: #{inspect(reason)}"
-          )
-      end
-    end)
-  end
-
-  defp find_repos do
-    app = Mix.Project.config()[:app]
-    modules = Application.spec(app, :modules) || []
-    Enum.filter(modules, fn mod -> function_exported?(mod, :__ash_clickhouse_repo__, 0) end)
-  rescue
-    _ -> []
-  end
-
-  defp find_resources do
-    app = Mix.Project.config()[:app]
-    modules = Application.spec(app, :modules) || []
-    Enum.filter(modules, fn mod -> function_exported?(mod, :__ash_clickhouse__, 1) end)
-  rescue
-    _ -> []
+    Extension.migrate([])
   end
 end

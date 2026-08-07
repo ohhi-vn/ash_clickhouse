@@ -4,6 +4,11 @@
 
 ### Features
 
+- **Standard Ash mix tasks.** `AshClickhouse.DataLayer.Extension` now implements
+  `Spark.Dsl.Extension` with `codegen/1` and `migrate/1`, so `mix ash.codegen`
+  (print pending DDL, with `--dry-run` / `--check` support) and `mix ash.migrate`
+  (apply DDL) work out of the box. `mix ash_clickhouse.migrate` now delegates to
+  the same `migrate/1`, keeping both commands in sync.
 - **Data-skipping indexes.** Declare ClickHouse data-skipping indexes
   (`minmax`, `set`, `bloom_filter`, `ngrambf_v1`, `tokenbf_v1`) inside the
   `clickhouse` block via the repeatable `index` macro. They are emitted in the
@@ -72,8 +77,6 @@
   and `repo/1`, which always raised (and were silently swallowed) at runtime.
   They now use `Dsl.table/1` / `Dsl.repo/1` directly.
 
-### Improvements
-
 - **Relationship aggregates are now batched.** `attach_aggregates/5` issues one
   grouped query per aggregate across the whole result set (instead of one query
   per record × aggregate), turning an N×M round-trip pattern into M round-trips.
@@ -100,6 +103,21 @@
 - **Documented** the intentional difference between strict `sanitize!/1`
   (table/database names) and `quote_name/1` (column identifiers), and marked
   the unused `group_by` query field as dead scaffolding.
+- **Split the mono-module `data_layer.ex` into focused modules** under
+  `AshClickhouse.DataLayer.*`: `Insert` (value encoding + insert/update SQL),
+  `Record` (row → Ash record decoding), `Aggregate` (native + batched
+  relationship aggregates), and `Calculations` (in-memory calculation
+  application). The public API is unchanged.
+- **`Connection.query!/4` now reraises a wrapped `ClickhouseError`** (instead of
+  re-raising a fresh one), preserving the original stacktrace while still
+  normalizing client errors.
+- **`QueryBuilder.build_where_clause/2` no longer grows params quadratically.**
+  The `params ++ mapped` append inside the reduce was replaced with prepend +
+  single `Enum.reverse()`/`Enum.concat()`, so building WHERE clauses is now
+  linear in the number of filters.
+- **Shared mix-task helpers.** `find_repos/0` / `find_resources/0` moved into
+  `Mix.Tasks.AshClickhouse.Helpers`, removing the duplication between
+  `mix ash_clickhouse.setup` and `mix ash_clickhouse.migrate`.
 
 ## 0.1.0
 

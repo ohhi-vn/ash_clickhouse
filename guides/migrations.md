@@ -6,12 +6,22 @@ attributes and `clickhouse` DSL options.
 
 ## Tasks
 
-Two Mix tasks are provided:
+AshClickhouse integrates with both the standard Ash tasks and its own named
+tasks. The Ash tasks (`mix ash.codegen` and `mix ash.migrate`) are discovered
+via `AshClickhouse.DataLayer.Extension`, which implements
+`Spark.Dsl.Extension`, so the Ash tasks and its dedicated tasks are:
 
 ```sh
+mix ash.codegen             # print pending DDL (see below)
+mix ash.migrate             # CREATE TABLE (+ ALTER) for each resource
 mix ash_clickhouse.setup    # CREATE DATABASE IF NOT EXISTS for each repo
-mix ash_clickhouse.migrate  # CREATE TABLE (+ ALTER) for each resource
+mix ash_clickhouse.migrate  # same as mix ash.migrate
 ```
+
+`mix ash.migrate` is equivalent to `mix ash_clickhouse.migrate`, and
+`mix ash.codegen` prints the DDL that would be applied (without touching the
+database). The `--check` flag exits with status 1 when there are pending
+changes, which is useful for CI.
 
 `mix ash_clickhouse.setup` iterates over all `AshClickhouse.Repo` modules and
 calls `create_database/0`. If a repo has no `:database` configured, it targets

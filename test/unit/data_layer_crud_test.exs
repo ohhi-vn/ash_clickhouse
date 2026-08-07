@@ -33,7 +33,10 @@ defmodule AshClickhouse.DataLayerCrudTest do
     @moduledoc "Records every call and returns canned ClickHouse results."
     use Agent
 
-    def start_link(opts \\ []), do: Agent.start_link(fn -> %{calls: []} end, opts)
+    # Start unlinked so the agent survives the test process exiting between
+    # tests (a linked Agent.start_link would be killed when each test's
+    # process terminates, leaving a dead named process for the next setup).
+    def start(opts \\ []), do: Agent.start(fn -> %{calls: []} end, opts)
 
     def record_call(pid, call),
       do: Agent.update(pid, &Map.update!(&1, :calls, fn c -> [call | c] end))
@@ -211,7 +214,7 @@ defmodule AshClickhouse.DataLayerCrudTest do
   end
 
   setup do
-    case FakeRepo.start_link(name: FakeRepo) do
+    case FakeRepo.start(name: FakeRepo) do
       {:ok, _} -> :ok
       {:error, {:already_started, _}} -> :ok
     end

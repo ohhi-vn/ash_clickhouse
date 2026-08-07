@@ -24,7 +24,7 @@ Add the dependency to `mix.exs`:
 def deps do
   [
     {:ash, "~> 3.0"},
-    {:ash_clickhouse, "~> 0.2.0"}
+    {:ash_clickhouse, "~> 0.5.0"}
   ]
 end
 ```
@@ -121,7 +121,7 @@ users = Ash.read!(MyApp.User)
 - [Configuration](configuration.md) — all Repo and resource options
 - [Migrations](migrations.md) — schema generation and evolution
 - [Querying](querying.md) — filters, sorting, aggregates, bulk operations
-- [Multitenancy](multitenancy.md) — database- and attribute-based tenants
+- [Multitenancy](multitenancy.md) — attribute- and context-based tenants
 - [Types](types.md) — Ash ↔ ClickHouse type mapping
 - [Telemetry](telemetry.md) — observability
 - [Limitations](limitations.md) — what is not supported and why

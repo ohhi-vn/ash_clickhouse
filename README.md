@@ -14,7 +14,7 @@ ClickHouse is a full SQL columnar store, so most Ash query features map directly
 - `bulk_create` (batch `INSERT`)
 - `update_query` / `destroy_query` (via `ALTER TABLE ... UPDATE/DELETE`)
 - Native aggregates (`count`, `sum`, `avg`, `min`, `max`)
-- `multitenancy` (database- or attribute-based)
+- `multitenancy` (attribute- or context-based)
 - `calculate`, `composite_primary_key`, `nested_expressions`, `boolean_filter`
 
 ### Not supported
@@ -31,7 +31,7 @@ ClickHouse is a full SQL columnar store, so most Ash query features map directly
 ```elixir
 def deps do
   [
-    {:ash_clickhouse, "~> 0.1.0"}
+    {:ash_clickhouse, "~> 0.5.0"}
   ]
 end
 ```
@@ -102,6 +102,8 @@ mix ash_clickhouse.migrate
 users = Ash.read!(MyApp.User)
 ```
 
+See [Getting Started](guides/getting-started.md) for the full walkthrough.
+
 ## Configuration
 
 ### Resource (`clickhouse` DSL)
@@ -151,13 +153,29 @@ time.)
 
 ### Repo
 
-| Option | Default |
-| --- | --- |
-| `url` | `"http://localhost:8123"` |
-| `username` | `"default"` |
-| `password` | `""` |
-| `database` | `nil` |
-| `timeout` | `30_000` |
+| Option | Default | Description |
+| --- | --- | --- |
+| `url` | `"http://localhost:8123"` | ClickHouse HTTP URL |
+| `username` | `"default"` | Credentials username |
+| `password` | `""` | Credentials password |
+| `database` | `nil` | Default database name |
+| `pool_size` | `10` | Connection pool size |
+| `pool_timeout` | `30_000` | Pool checkout timeout (ms) |
+| `ping_retry` | `30_000` | Ping retry interval (ms) |
+
+## Documentation
+
+Guides are available under [guides/](guides/):
+
+- [Getting Started](guides/getting-started.md)
+- [Defining Resources](guides/resources.md)
+- [Configuration](guides/configuration.md)
+- [Migrations](guides/migrations.md)
+- [Querying](guides/querying.md)
+- [Multitenancy](guides/multitenancy.md)
+- [Type Mapping](guides/types.md)
+- [Telemetry](guides/telemetry.md)
+- [Limitations](guides/limitations.md)
 
 ## License
 

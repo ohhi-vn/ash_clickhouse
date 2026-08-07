@@ -32,6 +32,28 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
     Application.get_env(:ash_clickhouse, :raise_on_untranslatable_filter, true)
   end
 
+  # Builds the ` ORDER BY <cols>` clause for the given sorts.
+  defp build_order_clause(sorts) when sorts == [] or is_nil(sorts), do: ""
+
+  defp build_order_clause(sorts) do
+    " ORDER BY " <>
+      Enum.map_join(sorts, ", ", fn
+        {field, :asc} -> "#{Identifier.quote_name(field)} ASC"
+        {field, :desc} -> "#{Identifier.quote_name(field)} DESC"
+        {field, :asc_nils_first} -> "#{Identifier.quote_name(field)} ASC NULLS FIRST"
+        {field, :asc_nils_last} -> "#{Identifier.quote_name(field)} ASC NULLS LAST"
+        {field, :desc_nils_first} -> "#{Identifier.quote_name(field)} DESC NULLS FIRST"
+        {field, :desc_nils_last} -> "#{Identifier.quote_name(field)} DESC NULLS LAST"
+        field when is_atom(field) -> "#{Identifier.quote_name(field)} ASC"
+      end)
+  end
+
+  defp build_group_clause(group_by) when is_nil(group_by) or group_by == [], do: ""
+
+  defp build_group_clause(group_by) do
+    " GROUP BY " <> Enum.map_join(group_by, ", ", &Identifier.quote_name/1)
+  end
+
   @doc """
   Builds the final SELECT query and parameter list.
   """
@@ -72,34 +94,10 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
           "*"
       end
 
-    order_clause =
-      if sorts == [] or is_nil(sorts) do
-        ""
-      else
-        " ORDER BY " <>
-          Enum.map_join(sorts, ", ", fn
-            {field, :asc} -> "#{Identifier.quote_name(field)} ASC"
-            {field, :desc} -> "#{Identifier.quote_name(field)} DESC"
-            {field, :asc_nils_first} -> "#{Identifier.quote_name(field)} ASC NULLS FIRST"
-            {field, :asc_nils_last} -> "#{Identifier.quote_name(field)} ASC NULLS LAST"
-            {field, :desc_nils_first} -> "#{Identifier.quote_name(field)} DESC NULLS FIRST"
-            {field, :desc_nils_last} -> "#{Identifier.quote_name(field)} DESC NULLS LAST"
-            field when is_atom(field) -> "#{Identifier.quote_name(field)} ASC"
-          end)
-      end
-
+    order_clause = build_order_clause(sorts)
     limit_clause = if limit, do: " LIMIT #{validate_integer!(limit)}", else: ""
     offset_clause = if offset, do: " OFFSET #{validate_integer!(offset)}", else: ""
-
-    group_clause =
-      if group_by && group_by != [] do
-        # NOTE: `group_by` is currently dead scaffolding — no `Ash.DataLayer`
-        # callback populates it. `build_optimized_query/1` still emits a GROUP BY
-        # from it so the field is wired correctly if/when a callback is added.
-        " GROUP BY " <> Enum.map_join(group_by, ", ", &Identifier.quote_name/1)
-      else
-        ""
-      end
+    group_clause = build_group_clause(group_by)
 
     sql =
       IO.iodata_to_binary([
@@ -139,22 +137,26 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
   def build_where_clause(filters, resource) when is_list(filters) do
     uuid_fields = if resource, do: Types.uuid_attribute_names(resource), else: MapSet.new()
 
-    {parts, params} =
-      Enum.reduce(filters, {[], []}, fn filter, {parts_acc, params_acc} ->
+    {parts, param_chunks} =
+      Enum.reduce(filters, {[], []}, fn filter, {parts_acc, chunks_acc} ->
         case translate_predicate(filter) do
           {sql, _columns, new_params} ->
-            {[sql | parts_acc],
-             params_acc ++
-               Enum.map(new_params, fn {col, val} ->
-                 Types.convert_uuid_param(val, col, uuid_fields)
-               end)}
+            mapped_params =
+              Enum.map(new_params, fn {col, val} ->
+                Types.convert_uuid_param(val, col, uuid_fields)
+              end)
+
+            {[sql | parts_acc], [mapped_params | chunks_acc]}
 
           nil ->
-            {parts_acc, params_acc}
+            {parts_acc, chunks_acc}
         end
       end)
 
-    case Enum.reverse(parts) do
+    parts = Enum.reverse(parts)
+    params = param_chunks |> Enum.reverse() |> Enum.concat()
+
+    case parts do
       [] -> {"", []}
       parts -> {" WHERE " <> Enum.join(parts, " AND "), params}
     end

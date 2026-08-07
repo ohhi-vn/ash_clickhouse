@@ -33,7 +33,7 @@ Ash features are intentionally unsupported. The data layer reports these via
 - `bulk_create` (batched `INSERT`)
 - `update_query` / `destroy_query` (`ALTER TABLE ... UPDATE/DELETE`)
 - Native aggregates `count`, `sum`, `avg`, `min`, `max`
-- `multitenancy` (database- or attribute-based)
+- `multitenancy` (attribute- or context-based)
 - `calculate`, `composite_primary_key`, `nested_expressions`, `boolean_filter`
 - `stream`, `changeset_filter`, `action_select`, `expression_calculation`
 - `async_engine`

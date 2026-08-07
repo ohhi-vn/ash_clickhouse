@@ -57,11 +57,48 @@ defmodule AshClickhouse.Error do
     def exception(opts) when is_list(opts), do: struct!(__MODULE__, opts)
   end
 
+  # The exception structs raised/returned by the `clickhouse` client. These are
+  # the only errors the data layer treats as client errors; anything else is a
+  # genuine programming/runtime error and should propagate rather than being
+  # silently swapped into a misleading "ClickHouse error".
+  @client_error_modules [
+    ClickHouse.QueryError,
+    ClickHouse.ConnectionError,
+    ClickHouse.DatabaseError,
+    ClickHouse.ParsingError,
+    ClickHouse.StreamError,
+    ClickHouse.SystemError,
+    ClickHouse.CoordinationError
+  ]
+
+  @doc """
+  True when the given value is one of the `clickhouse` client's error structs.
+  """
+  @spec client_error?(term()) :: boolean()
+  def client_error?(%mod{}) when mod in @client_error_modules, do: true
+  def client_error?(_), do: false
+
   @doc """
   Wraps a ClickHouse client error into an Ash-compatible error.
   """
   @spec wrap_clickhouse_error(term()) :: AshClickhouse.Error.ClickhouseError.t()
   def wrap_clickhouse_error(error) do
     ClickhouseError.from_error(error)
+  end
+
+  @doc """
+  Reraises a rescued exception, converting client errors to `ClickhouseError`.
+
+  Client exceptions are translated to `AshClickhouse.Error.ClickhouseError` so
+  callers get a consistent, structured error. Any *other* exception (a genuine
+  bug in the library or caller) is reraised with its original stacktrace intact.
+  """
+  @spec reraise_or_wrap(term(), list()) :: no_return()
+  def reraise_or_wrap(e, stacktrace) do
+    if client_error?(e) do
+      raise wrap_clickhouse_error(e)
+    else
+      reraise e, stacktrace
+    end
   end
 end

@@ -82,8 +82,8 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
       %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: []}
     end
 
-    def insert_rows(_table, _statement, rows, _opts) do
-      record({:insert_rows, length(rows)})
+    def insert_rows(_table, statement, rows, _opts) do
+      record({:insert_rows, statement, rows})
       {:ok, :ok}
     end
 
@@ -197,17 +197,19 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
       # The record round-trips the value unchanged (no 16-byte binary mangling).
       assert record.order_number == business_id
 
-      # The INSERT params contain the original string, not a binary.
+      # The INSERT flow keeps the `business_id` as a 36-char string (not a 16-byte
+      # binary). The value is sent in the rows body rather than the statement
+      # header, so it must appear in the recorded rows un-mangled.
       insert_call =
         Enum.find(FakeRepo.calls(FakeRepo), fn
-          {:query, sql, _params} -> String.contains?(sql, "INSERT INTO")
+          {:insert_rows, statement, _rows} -> String.contains?(statement, "INSERT INTO")
           _ -> false
         end)
 
       assert insert_call != nil
 
-      {:query, _sql, params} = insert_call
-      assert business_id in params
+      {:insert_rows, _statement, rows} = insert_call
+      assert business_id in List.flatten(rows)
     end
 
     test "a real UUID-typed column is still converted to a 16-byte binary" do

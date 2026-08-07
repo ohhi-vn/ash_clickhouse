@@ -96,7 +96,9 @@ defmodule AshClickhouse.Connection do
   @doc """
   Runs a SQL query against ClickHouse.
 
-  Returns `{:ok, %ClickHouse.Result{}}` or `{:error, %ClickHouse.Error{}}`.
+  Returns `{:ok, %ClickHouse.Result{}}` or `{:error, %AshClickhouse.Error.ClickhouseError{}}`.
+  The non-bang variant never raises: any exception raised by the client is
+  converted to a normalized error tuple.
   """
   @spec query(t() | atom(), String.t(), list(), keyword()) ::
           {:ok, term()} | {:error, term()}
@@ -106,19 +108,33 @@ defmodule AshClickhouse.Connection do
     ClickHouse.query(conn, sql, params, with_default_format(opts))
   rescue
     e ->
-      Logger.error("AshClickhouse.Connection.query failed: #{Exception.message(e)}")
-      Logger.debug("Stacktrace:\n" <> Exception.format_stacktrace(__STACKTRACE__))
-      {:error, e}
+      Logger.debug("AshClickhouse.Connection.query failed: #{Exception.message(e)}")
+      {:error, AshClickhouse.Error.wrap_clickhouse_error(e)}
   end
 
   @doc """
   Runs a SQL query, raising on error.
+
+  Returns the `%ClickHouse.Result{}` on success and raises an
+  `AshClickhouse.Error.ClickhouseError` on failure.
   """
   @spec query!(t() | atom(), String.t(), list(), keyword()) :: term()
   def query!(conn_or_name, sql, params \\ [], opts \\ []) do
     {conn, opts} = resolve_conn(conn_or_name, opts)
-    {:ok, result} = ClickHouse.query(conn, sql, params, with_default_format(opts))
-    result
+
+    case ClickHouse.query(conn, sql, params, with_default_format(opts)) do
+      {:ok, result} ->
+        result
+
+      {:error, error} ->
+        raise AshClickhouse.Error.wrap_clickhouse_error(error)
+    end
+  rescue
+    e in AshClickhouse.Error.ClickhouseError ->
+      reraise e, __STACKTRACE__
+
+    e ->
+      reraise AshClickhouse.Error.wrap_clickhouse_error(e), __STACKTRACE__
   end
 
   @doc """
@@ -136,9 +152,8 @@ defmodule AshClickhouse.Connection do
     ClickHouse.query(conn, statement, rows, with_default_format(opts))
   rescue
     e ->
-      Logger.error("AshClickhouse.Connection.insert_rows failed: #{Exception.message(e)}")
-      Logger.debug("Stacktrace:\n" <> Exception.format_stacktrace(__STACKTRACE__))
-      {:error, e}
+      Logger.debug("AshClickhouse.Connection.insert_rows failed: #{Exception.message(e)}")
+      {:error, AshClickhouse.Error.wrap_clickhouse_error(e)}
   end
 
   @doc """

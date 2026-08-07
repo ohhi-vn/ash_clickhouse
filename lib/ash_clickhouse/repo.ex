@@ -124,8 +124,16 @@ defmodule AshClickhouse.Repo do
       @spec config() :: keyword()
       def config do
         case Application.get_env(@otp_app, __MODULE__) do
-          nil -> []
-          config when is_list(config) -> config
+          nil ->
+            []
+
+          config when is_list(config) ->
+            config
+
+          other ->
+            raise AshClickhouse.Error.ConfigurationError,
+                  "Expected the #{inspect(@otp_app)} config for #{inspect(__MODULE__)} " <>
+                    "to be a keyword list, got: #{inspect(other)}"
         end
       end
 

@@ -7,10 +7,12 @@ defmodule Mix.Tasks.AshClickhouse.Setup do
 
   use Mix.Task
 
+  alias Mix.Tasks.AshClickhouse.Helpers
+
   @impl Mix.Task
   def run(_args) do
     Mix.Task.run("compile")
-    repos = find_repos()
+    repos = Helpers.find_repos()
 
     if repos == [] do
       Mix.shell().info("No AshClickhouse.Repo modules found.")
@@ -23,13 +25,5 @@ defmodule Mix.Tasks.AshClickhouse.Setup do
         end
       end)
     end
-  end
-
-  defp find_repos do
-    modules = Mix.Project.config()[:app] && Application.spec(Mix.Project.config()[:app], :modules)
-    modules = modules || []
-    Enum.filter(modules, fn mod -> function_exported?(mod, :__ash_clickhouse_repo__, 0) end)
-  rescue
-    _ -> []
   end
 end
