@@ -217,7 +217,7 @@ defmodule AshClickhouse.MigrationTest do
                statements,
                &String.contains?(
                  &1,
-                 "ADD INDEX IF NOT EXISTS INDEX `idx_a` (a) TYPE minmax GRANULARITY 1"
+                 "ADD INDEX IF NOT EXISTS `idx_a` (a) TYPE minmax GRANULARITY 1"
                )
              )
 
@@ -225,7 +225,7 @@ defmodule AshClickhouse.MigrationTest do
                statements,
                &String.contains?(
                  &1,
-                 "ADD INDEX IF NOT EXISTS INDEX `idx_b` (b) TYPE bloom_filter GRANULARITY 2"
+                 "ADD INDEX IF NOT EXISTS `idx_b` (b) TYPE bloom_filter GRANULARITY 2"
                )
              )
     end

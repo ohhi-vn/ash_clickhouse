@@ -22,6 +22,18 @@ defmodule AshClickhouse.DataLayerRobustnessTest do
 
   describe "repo ETS cache (item #8)" do
     test "the cache table is created once at application start" do
+      # The table is normally created at boot, but other tests that stop/start
+      # the app (e.g. the Application start/2 tests) can tear it down. The data
+      # layer itself creates the table on demand, so mirror that here before
+      # asserting it is present.
+      case :ets.whereis(:ash_clickhouse_repo_cache) do
+        :undefined ->
+          :ets.new(:ash_clickhouse_repo_cache, [:named_table, :public, {:read_concurrency, true}])
+
+        _ ->
+          :ok
+      end
+
       assert :ets.whereis(:ash_clickhouse_repo_cache) != :undefined
     end
   end

@@ -33,7 +33,7 @@ defmodule AshClickhouse.Migration do
       |> Info.attributes()
       |> Enum.map(&column_definition(&1, resource))
 
-    index_defs = Enum.map(Dsl.indexes(resource), &index_definition_cql/1)
+    index_defs = Enum.map(Dsl.indexes(resource), &("INDEX " <> index_definition_cql(&1)))
 
     columns_and_indexes = Enum.join(columns ++ index_defs, ",\n  ")
 
@@ -82,13 +82,30 @@ defmodule AshClickhouse.Migration do
     |> Enum.join("\n")
   end
 
+  @doc "Returns whether the resource table exists in ClickHouse."
+  @spec table_exists?(module(), module()) :: boolean()
+  def table_exists?(resource, repo) do
+    table = AshClickhouse.DataLayer.source(resource)
+    database = Dsl.database(resource) || repo.database() || "default"
+
+    case repo.query(
+           "SELECT 1 FROM system.tables WHERE name = ? AND database = ? LIMIT 1",
+           [table, database]
+         ) do
+      {:ok, %ClickHouse.Result{rows: rows}} -> rows != []
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
   defp index_definition_cql(%{
          name: name,
          expression: expression,
          type: type,
          granularity: granularity
        }) do
-    "INDEX #{Identifier.quote_name(name)} (#{expression}) TYPE #{type} GRANULARITY #{granularity}"
+    "#{Identifier.quote_name(name)} (#{expression}) TYPE #{type} GRANULARITY #{granularity}"
   end
 
   defp column_definition(attr, resource) do

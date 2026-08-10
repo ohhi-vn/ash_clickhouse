@@ -24,6 +24,18 @@ defmodule AshClickhouse.TypesEdgeTest do
     test "decimal tuple form falls back to String (use resolve_attr_type for constraints)" do
       assert Types.ash_type_to_clickhouse({:decimal, [precision: 18, scale: 4]}) == "String"
     end
+
+    test "every supported scalar atom type maps to its ClickHouse type" do
+      assert Types.ash_type_to_clickhouse(:double) == "Float64"
+      assert Types.ash_type_to_clickhouse(:text) == "String"
+      assert Types.ash_type_to_clickhouse(:atom) == "String"
+      assert Types.ash_type_to_clickhouse(:ci_string) == "String"
+      assert Types.ash_type_to_clickhouse(:naive_datetime) == "DateTime64(6)"
+      assert Types.ash_type_to_clickhouse(:time) == "String"
+      assert Types.ash_type_to_clickhouse(:decimal) == "Decimal(38, 10)"
+      assert Types.ash_type_to_clickhouse(:binary) == "String"
+      assert Types.ash_type_to_clickhouse(:array) == "Array(String)"
+    end
   end
 
   describe "resolve_attr_type/1 edge cases" do
@@ -70,6 +82,21 @@ defmodule AshClickhouse.TypesEdgeTest do
       assert Types.encode_value(5, %{type: :integer}) == 5
     end
 
+    test "encodes via module Ash types and tuple/alias forms" do
+      assert Types.encode_value(%{a: 1}, %{type: Ash.Type.Map}) == %{"a" => "1"}
+      assert Types.encode_value(%{a: 1}, %{type: {:map, :string, :integer}}) == %{"a" => "1"}
+      assert Types.encode_value([1, 2], %{type: Ash.Type.Array}) == ["1", "2"]
+      assert Types.encode_value([1, 2], %{type: :list}) == ["1", "2"]
+      assert Types.encode_value([1, 2], %{type: {:array, :integer}}) == ["1", "2"]
+    end
+
+    test "encodes module Time type and time_usec, leaving non-Time values alone" do
+      {:ok, time} = Time.from_iso8601("12:00:00")
+      assert Types.encode_value(time, %{type: Ash.Type.Time}) == "12:00:00"
+      assert Types.encode_value(time, %{type: :time_usec}) == "12:00:00"
+      assert Types.encode_value(:not_a_time, %{type: :time_usec}) == :not_a_time
+    end
+
     test "non-map attr passes through unchanged" do
       assert Types.encode_value("x", :not_a_map) == "x"
     end
@@ -82,10 +109,23 @@ defmodule AshClickhouse.TypesEdgeTest do
       assert Types.decode_value(nil, %{type: :integer}) == nil
     end
 
+    test "decodes integer from a string with trailing junk, and non-numbers pass through" do
+      assert Types.decode_value("99px", %{type: :integer}) == 99
+      assert Types.decode_value("abc", %{type: :integer}) == "abc"
+      assert Types.decode_value(1.5, %{type: :integer}) == 1.5
+    end
+
     test "decodes float from string, int and float" do
       assert Types.decode_value("1.5", %{type: :float}) == 1.5
       assert Types.decode_value(2, %{type: :float}) == 2.0
       assert Types.decode_value(3.5, %{type: :float}) == 3.5
+    end
+
+    test "decodes float from a string with trailing junk, nil, and non-numbers pass through" do
+      assert Types.decode_value("1.5em", %{type: :float}) == 1.5
+      assert Types.decode_value("oops", %{type: :float}) == "oops"
+      assert Types.decode_value(nil, %{type: :float}) == nil
+      assert Types.decode_value(:no, %{type: :float}) == :no
     end
 
     test "decodes boolean from int, string and atom" do
@@ -97,6 +137,13 @@ defmodule AshClickhouse.TypesEdgeTest do
       assert Types.decode_value(false, %{type: :boolean}) == false
     end
 
+    test "decodes boolean from 1/0 strings, nil, and passes non-matching values through" do
+      assert Types.decode_value("1", %{type: :boolean}) == true
+      assert Types.decode_value("false", %{type: :boolean}) == false
+      assert Types.decode_value(nil, %{type: :boolean}) == nil
+      assert Types.decode_value(:weird, %{type: :boolean}) == :weird
+    end
+
     test "decodes decimal from string and Decimal" do
       assert %Decimal{} = Types.decode_value("2.5", %{type: :decimal})
 
@@ -105,11 +152,21 @@ defmodule AshClickhouse.TypesEdgeTest do
       assert Types.decode_value(nil, %{type: :decimal}) == nil
     end
 
+    test "decodes decimal from a string with trailing junk, and non-numbers pass through" do
+      assert %Decimal{} = Types.decode_value("2.5m", %{type: :decimal})
+      assert Types.decode_value("abc", %{type: :decimal}) == "abc"
+      assert Types.decode_value(42, %{type: :decimal}) == 42
+    end
+
     test "decodes time from string" do
       {:ok, time} = Time.from_iso8601("01:02:03")
       assert Types.decode_value("01:02:03", %{type: :time}) == time
       assert Types.decode_value(nil, %{type: :time}) == nil
       assert Types.decode_value("garbage", %{type: :time}) == "garbage"
+    end
+
+    test "decodes non-string non-nil time values unchanged" do
+      assert Types.decode_value(123, %{type: :time}) == 123
     end
 
     test "passes through unknown types unchanged" do
@@ -123,7 +180,7 @@ defmodule AshClickhouse.TypesEdgeTest do
 
   describe "uuid helpers edge cases" do
     test "round trips a UUID through binary and string" do
-      uuid = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"
+      uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
       {:ok, bin} = Types.uuid_string_to_binary(uuid)
       assert byte_size(bin) == 16
       {:ok, back} = Types.uuid_binary_to_string(bin)
@@ -137,6 +194,11 @@ defmodule AshClickhouse.TypesEdgeTest do
       assert :error = Types.uuid_binary_to_string(:not_binary)
     end
 
+    test "rejects invalid hex digits and wrong dash splits" do
+      assert :error = Types.uuid_string_to_binary("123e4567-e89b-12d3-a456-42661417400g")
+      assert :error = Types.uuid_string_to_binary("12345678-1234-1234-1234-12345678-extra")
+    end
+
     test "uuid_like_string? is precise" do
       assert Types.uuid_like_string?("ffffffff-ffff-ffff-ffff-ffffffffffff")
       # `:mixed` case decoding accepts uppercase hex too.
@@ -144,6 +206,44 @@ defmodule AshClickhouse.TypesEdgeTest do
       refute Types.uuid_like_string?("ffffffff-ffff-ffff-ffff")
       refute Types.uuid_like_string?("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz")
       refute Types.uuid_like_string?(123)
+    end
+
+    test "uuid_like_string? rejects wrong segment lengths" do
+      refute Types.uuid_like_string?("12345678-1234-1234-1234-1234567890")
+    end
+
+    test "convert_uuid_param converts a 16-byte binary in a uuid column" do
+      uuid = "123e4567-e89b-12d3-a456-426614174000"
+      {:ok, bin} = Types.uuid_string_to_binary(uuid)
+      uuid_fields = MapSet.new([:external_id, "external_id"])
+
+      assert Types.convert_uuid_param(bin, :external_id, uuid_fields) == uuid
+    end
+  end
+
+  describe "uuid_attribute_names/1 and atom_attribute_names/1" do
+    defmodule UuidAttrResource do
+      use Ash.Resource,
+        data_layer: AshClickhouse.DataLayer,
+        domain: nil
+
+      attributes do
+        uuid_primary_key(:id)
+        attribute(:external_id, :uuid)
+        attribute(:status, :atom)
+      end
+    end
+
+    test "recognizes atom-typed :uuid attributes" do
+      names = Types.uuid_attribute_names(UuidAttrResource)
+      assert :external_id in names
+      assert "external_id" in names
+      assert :id in names
+    end
+
+    test "recognizes atom-typed :atom attributes" do
+      names = Types.atom_attribute_names(UuidAttrResource)
+      assert :status in names
     end
   end
 end

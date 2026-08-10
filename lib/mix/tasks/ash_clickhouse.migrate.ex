@@ -13,8 +13,8 @@ defmodule Mix.Tasks.AshClickhouse.Migrate do
   alias AshClickhouse.DataLayer.Extension
 
   @impl Mix.Task
-  def run(_args) do
+  def run(args) do
     Mix.Task.run("compile")
-    Extension.migrate([])
+    Extension.migrate(args)
   end
 end

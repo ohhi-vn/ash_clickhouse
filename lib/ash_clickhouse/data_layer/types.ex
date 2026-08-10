@@ -104,7 +104,8 @@ defmodule AshClickhouse.DataLayer.Types do
       attr.type in [Type.Decimal, :decimal] ->
         decimal_type(constraints)
 
-      is_atom(attr.type) and function_exported?(attr.type, :storage_type, 1) ->
+      is_atom(attr.type) and Code.ensure_loaded?(attr.type) and
+          function_exported?(attr.type, :storage_type, 1) ->
         ash_type_to_clickhouse(attr.type.storage_type(constraints))
 
       true ->
@@ -397,6 +398,7 @@ defmodule AshClickhouse.DataLayer.Types do
   defp format_hex(value, len) do
     value
     |> Integer.to_string(16)
+    |> String.downcase()
     |> String.pad_leading(len, "0")
   end
 

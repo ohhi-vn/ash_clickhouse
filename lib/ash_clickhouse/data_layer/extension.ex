@@ -18,10 +18,14 @@ defmodule AshClickhouse.DataLayer.Extension do
   Ash tasks discover and orchestrate the ClickHouse codegen/migrate pipeline.
   """
 
+  @behaviour Ash.Extension
+
   use Spark.Dsl.Extension
 
   alias AshClickhouse.DataLayer.Dsl
   alias AshClickhouse.Migration
+  alias AshClickhouse.MigrationGenerator
+  alias AshClickhouse.MigrationRunner
   alias Mix.Tasks.AshClickhouse.Helpers
 
   @doc """
@@ -38,7 +42,31 @@ defmodule AshClickhouse.DataLayer.Extension do
   """
   @spec codegen([String.t()]) :: :ok | no_return()
   def codegen(argv) do
-    codegen(argv, Helpers.find_resources())
+    MigrationGenerator.generate(parse_codegen_argv(argv))
+  end
+
+  @doc false
+  def parse_codegen_argv(argv) do
+    [
+      name: extract_name(argv),
+      dev: "--dev" in argv,
+      dry_run: "--dry-run" in argv,
+      check: "--check" in argv
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == false end)
+  end
+
+  defp extract_name(argv) do
+    case Enum.split_while(argv, &(&1 != "--name")) do
+      {_, ["--name", name | _]} when is_binary(name) and name != "" ->
+        name
+
+      {[first | _], _} when is_binary(first) ->
+        if String.starts_with?(first, "-"), do: nil, else: first
+
+      _ ->
+        nil
+    end
   end
 
   @doc false
@@ -69,15 +97,29 @@ defmodule AshClickhouse.DataLayer.Extension do
   @spec migrate([String.t()]) :: :ok
   def migrate(_argv) do
     Mix.Task.run("compile")
-
     repos = Helpers.find_repos()
+    Helpers.start_clients(repos)
 
-    Enum.each(repos, fn repo ->
-      resources = Helpers.find_resources()
+    Enum.each(repos, &MigrationRunner.run/1)
+  end
 
-      Enum.each(resources, fn resource ->
-        migrate_resource(repo, resource)
-      end)
+  @doc false
+  def migrate(repos, resources) do
+    Enum.each(resources, fn resource ->
+      repo = Dsl.repo(resource)
+
+      cond do
+        is_nil(repo) ->
+          Mix.shell().error(
+            "Skipping #{inspect(resource)}: no repo configured (add `repo MyApp.Repo` to its clickhouse block)."
+          )
+
+        Enum.member?(repos, repo) ->
+          migrate_resource(repo, resource)
+
+        true ->
+          :ok
+      end
     end)
 
     :ok
@@ -88,54 +130,52 @@ defmodule AshClickhouse.DataLayer.Extension do
     resources
     |> Enum.filter(&Dsl.migrate?/1)
     |> Enum.flat_map(fn resource ->
-      create = Migration.create_table_cql(resource)
-      alter = Migration.alter_table_cql(resource, repo_for(resource))
-      {index, _} = Migration.alter_indexes_cql(resource, repo_for(resource))
-      [create] ++ alter ++ index
+      case Dsl.repo(resource) do
+        nil ->
+          Mix.shell().error(
+            "Skipping #{inspect(resource)}: no repo configured (add `repo MyApp.Repo` to its clickhouse block)."
+          )
+
+          []
+
+        repo ->
+          create = Migration.create_table_cql(resource)
+
+          if Migration.table_exists?(resource, repo) do
+            alter = Migration.alter_table_cql(resource, repo)
+            {index, _} = Migration.alter_indexes_cql(resource, repo)
+            alter ++ index
+          else
+            [create]
+          end
+      end
     end)
   end
 
-  defp repo_for(resource) do
-    Dsl.repo(resource) ||
-      raise(
-        ArgumentError,
-        "could not resolve a repo for #{inspect(resource)}; add `repo MyApp.Repo` to its clickhouse block"
-      )
-  end
-
   defp migrate_resource(repo, resource) do
-    resource_repo = Dsl.repo(resource)
+    if Dsl.migrate?(resource) do
+      try do
+        create_statements = Migration.generate_resource_cql(resource)
+        run_statements(repo, create_statements, "Migrated", resource)
 
-    cond do
-      is_nil(resource_repo) ->
-        Mix.shell().error(
-          "Skipping #{inspect(resource)}: no repo configured (add `repo MyApp.Repo` to its clickhouse block)."
-        )
+        alter_statements = Migration.alter_table_cql(resource, repo)
+        run_statements(repo, alter_statements, "Altered", resource)
 
-      resource_repo == repo and Dsl.migrate?(resource) ->
-        try do
-          create_statements = Migration.generate_resource_cql(resource)
-          run_statements(repo, create_statements, "Migrated", resource)
+        {index_statements, index_warnings} = Migration.alter_indexes_cql(resource, repo)
+        run_statements(repo, index_statements, "Added index for", resource)
 
-          alter_statements = Migration.alter_table_cql(resource, repo)
-          run_statements(repo, alter_statements, "Altered", resource)
-
-          {index_statements, index_warnings} = Migration.alter_indexes_cql(resource, repo)
-          run_statements(repo, index_statements, "Added index for", resource)
-
-          Enum.each(index_warnings, fn warning ->
-            Mix.shell().error(warning)
-          end)
-        rescue
-          e ->
-            Mix.shell().error(
-              "Failed to generate migration for #{inspect(resource)}: #{Exception.message(e)}"
-            )
-        end
-
-      true ->
-        :ok
+        Enum.each(index_warnings, fn warning ->
+          Mix.shell().error(warning)
+        end)
+      rescue
+        e ->
+          Mix.shell().error(
+            "Failed to generate migration for #{inspect(resource)}: #{Exception.message(e)}"
+          )
+      end
     end
+
+    :ok
   end
 
   defp run_statements(repo, statements, verb, resource) do

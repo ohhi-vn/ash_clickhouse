@@ -14,6 +14,10 @@ case :ets.whereis(:ash_clickhouse_repo_cache) do
     :ok
 end
 
+# Telemetry tests attach/detach handlers, which require the `:telemetry`
+# application to be running even when tests are executed with `--no-start`.
+{:ok, _} = Application.ensure_all_started(:telemetry)
+
 # Load test support files. They are required explicitly here (rather than via
 # `elixirc_paths`) so they are guaranteed to be loaded for every test, including
 # when a single test file is run with an explicit path filter. Requiring them

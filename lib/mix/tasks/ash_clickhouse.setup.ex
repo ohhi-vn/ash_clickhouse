@@ -14,6 +14,22 @@ defmodule Mix.Tasks.AshClickhouse.Setup do
     Mix.Task.run("compile")
     repos = Helpers.find_repos()
 
+    # Connect without a bound database: the target database may not exist yet
+    # (that is what this task creates), so the CREATE DATABASE statement must
+    # run against the server's default database.
+    Helpers.start_clients(repos, database: nil)
+
+    create_databases(repos)
+  end
+
+  @doc """
+  Creates the database for each repo, printing the outcome to the shell.
+
+  Split out from `run/1` so the success/error branches are unit-testable
+  without the app's compiled modules.
+  """
+  @spec create_databases([module()]) :: :ok
+  def create_databases(repos) do
     if repos == [] do
       Mix.shell().info("No AshClickhouse.Repo modules found.")
       :ok

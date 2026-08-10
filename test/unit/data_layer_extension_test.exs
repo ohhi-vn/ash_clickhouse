@@ -10,6 +10,118 @@ defmodule AshClickhouse.DataLayer.ExtensionTest do
   alias AshClickhouse.DataLayer.Extension
   alias AshClickhouse.Migration
 
+  defmodule FakeRepo do
+    def query(statement, _params) do
+      send(self(), {:repo_query, statement})
+      {:ok, %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: []}}
+    end
+
+    def database, do: "test_db"
+  end
+
+  defmodule FakeRepo2 do
+    def query(_statement, _params),
+      do: {:error, :connection_failed}
+
+    def database, do: "test_db"
+  end
+
+  defmodule MigrateResource do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("migrate_table")
+      repo(FakeRepo)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:name, :string)
+    end
+  end
+
+  defmodule MutedResource do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("muted_table")
+      repo(FakeRepo)
+      migrate(false)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+    end
+  end
+
+  defmodule NoRepoResource do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("no_repo_table")
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+    end
+  end
+
+  defmodule OtherRepoResource do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("other_repo_table")
+      repo(FakeRepo2)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+    end
+  end
+
+  defmodule ErrorResource do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("error_table")
+      repo(FakeRepo2)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+    end
+  end
+
+  defp capture_all(fun) do
+    out =
+      capture_io(fn ->
+        err = capture_io(:stderr, fun)
+        Process.put(:captured_err, err)
+      end)
+
+    out <> Process.get(:captured_err, "")
+  end
+
   test "implements Spark.Dsl.Extension so the Ash tasks discover it" do
     assert Spark.implements_behaviour?(Extension, Spark.Dsl.Extension)
   end
@@ -18,73 +130,117 @@ defmodule AshClickhouse.DataLayer.ExtensionTest do
     assert Extension.name() == "AshClickhouse"
   end
 
-  test "codegen prints the CREATE TABLE DDL for a resource without applying it" do
-    defmodule CodegenResource do
-      use Ash.Resource,
-        data_layer: AshClickhouse.DataLayer,
-        domain: nil
+  describe "codegen/2" do
+    test "prints the CREATE TABLE DDL for a resource without applying it" do
+      output =
+        capture_io(fn ->
+          assert Extension.codegen(["--dry-run"], [MigrateResource]) == :ok
+        end)
 
-      import AshClickhouse.DataLayer.Dsl.Macros
-
-      clickhouse do
-        table("codegen_table")
-        repo(AshClickhouse.TestRepo)
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-        attribute(:name, :string)
-      end
+      create = Migration.create_table_cql(MigrateResource)
+      assert output =~ create
+      assert output =~ "CREATE TABLE IF NOT EXISTS"
     end
 
-    output =
-      capture_io(fn ->
-        assert Extension.codegen(["--dry-run"], [CodegenResource]) == :ok
-      end)
+    test "prints ALTER statements for missing columns and indexes" do
+      output =
+        capture_io(fn ->
+          assert Extension.codegen(["--dry-run"], [MigrateResource]) == :ok
+        end)
 
-    create = Migration.create_table_cql(CodegenResource)
-    assert output =~ create
-    assert output =~ "CREATE TABLE IF NOT EXISTS"
+      assert output =~ "ALTER TABLE `migrate_table` ADD COLUMN IF NOT EXISTS"
+    end
+
+    test "prints nothing pending and reports when there are no changes" do
+      output =
+        capture_io(fn ->
+          assert Extension.codegen(["--dry-run"], []) == :ok
+        end)
+
+      assert output =~ "No pending ClickHouse changes."
+    end
+
+    test "with --check raises when there are pending changes" do
+      assert_raise Mix.Error, fn -> Extension.codegen(["--check"], [MigrateResource]) end
+    end
+
+    test "with --check passes when a resource has migrate disabled" do
+      assert Extension.codegen(["--check"], [MutedResource]) == :ok
+    end
+
+    test "skips resources with migrate disabled" do
+      output =
+        capture_io(fn ->
+          assert Extension.codegen(["--dry-run"], [MutedResource]) == :ok
+        end)
+
+      assert output =~ "No pending ClickHouse changes."
+      refute output =~ "CREATE TABLE IF NOT EXISTS"
+    end
+
+    test "does not crash on a resource without a repo configured" do
+      output =
+        capture_all(fn ->
+          assert Extension.codegen(["--dry-run"], [NoRepoResource]) == :ok
+        end)
+
+      assert output =~ "no repo configured"
+      refute output =~ "CREATE TABLE IF NOT EXISTS"
+    end
   end
 
-  test "codegen with --check raises when there are pending changes" do
-    defmodule CheckResource do
-      use Ash.Resource,
-        data_layer: AshClickhouse.DataLayer,
-        domain: nil
+  describe "migrate/2" do
+    test "applies CREATE / ALTER statements via the resource's repo" do
+      output =
+        capture_io(fn ->
+          assert Extension.migrate([FakeRepo], [MigrateResource]) == :ok
+        end)
 
-      import AshClickhouse.DataLayer.Dsl.Macros
-
-      clickhouse do
-        table("check_resource")
-        repo(AshClickhouse.TestRepo)
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-      end
+      assert output =~ "Migrated AshClickhouse.DataLayer.ExtensionTest.MigrateResource"
+      assert output =~ "Altered AshClickhouse.DataLayer.ExtensionTest.MigrateResource"
     end
 
-    assert_raise Mix.Error, fn -> Extension.codegen(["--check"], [CheckResource]) end
+    test "skips resources whose repo is not in the list" do
+      output =
+        capture_all(fn ->
+          assert Extension.migrate([FakeRepo], [OtherRepoResource]) == :ok
+        end)
 
-    defmodule CheckResourceMuted do
-      use Ash.Resource,
-        data_layer: AshClickhouse.DataLayer,
-        domain: nil
-
-      import AshClickhouse.DataLayer.Dsl.Macros
-
-      clickhouse do
-        table("check_resource_muted")
-        repo(AshClickhouse.TestRepo)
-        migrate(false)
-      end
-
-      attributes do
-        uuid_primary_key(:id)
-      end
+      refute output =~ "Migrated"
+      refute output =~ "connection_failed"
     end
 
-    assert Extension.codegen(["--check"], [CheckResourceMuted]) == :ok
+    test "skips resources with migrate disabled" do
+      output =
+        capture_all(fn ->
+          assert Extension.migrate([FakeRepo], [MutedResource]) == :ok
+        end)
+
+      refute output =~ "Migrated"
+    end
+
+    test "reports resources without a repo configured" do
+      output =
+        capture_all(fn ->
+          assert Extension.migrate([FakeRepo], [NoRepoResource]) == :ok
+        end)
+
+      assert output =~ "no repo configured"
+      refute output =~ "Migrated"
+    end
+
+    test "reports repo query failures without raising" do
+      output =
+        capture_all(fn ->
+          assert Extension.migrate([FakeRepo2], [ErrorResource]) == :ok
+        end)
+
+      assert output =~ "Failed to migrate"
+      refute output =~ "Migrated"
+    end
+
+    test "returns :ok with empty repos and resources" do
+      assert Extension.migrate([], []) == :ok
+    end
   end
 end

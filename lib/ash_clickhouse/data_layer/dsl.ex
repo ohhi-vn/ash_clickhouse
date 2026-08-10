@@ -61,7 +61,7 @@ defmodule AshClickhouse.DataLayer.Dsl do
   # --- getters -------------------------------------------------------------
 
   defp get_config(resource, key, default \\ nil) do
-    if function_exported?(resource, :__ash_clickhouse__, 1) do
+    if Code.ensure_loaded?(resource) && function_exported?(resource, :__ash_clickhouse__, 1) do
       resource.__ash_clickhouse__(key)
     else
       default
