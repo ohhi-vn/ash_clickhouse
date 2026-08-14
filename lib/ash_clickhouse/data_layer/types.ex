@@ -199,10 +199,19 @@ defmodule AshClickhouse.DataLayer.Types do
   are parsed back into `Time` structs.
   """
   @type_dispatch %{
-    Type.Time => :time,
-    :time => :time,
-    :time_usec => :time,
-    Type.Integer => :integer,
+     Type.Time => :time,
+     :time => :time,
+     :time_usec => :time,
+     Type.DateTime => :datetime,
+     Type.UtcDatetime => :datetime,
+     Type.UtcDatetimeUsec => :datetime,
+     Type.NaiveDatetime => :datetime,
+     Type.NaiveDatetimeUsec => :datetime,
+     :utc_datetime => :datetime,
+     :utc_datetime_usec => :datetime,
+     :naive_datetime => :datetime,
+     :naive_datetime_usec => :datetime,
+     Type.Integer => :integer,
     :integer => :integer,
     Type.Float => :float,
     :float => :float,
@@ -217,6 +226,7 @@ defmodule AshClickhouse.DataLayer.Types do
   def decode_value(value, attr) when is_map(attr) do
     case Map.get(@type_dispatch, attr.type) do
       :time -> decode_time(value)
+      :datetime -> decode_datetime(value)
       :integer -> decode_integer(value)
       :float -> decode_float(value)
       :boolean -> decode_boolean(value)
@@ -226,6 +236,30 @@ defmodule AshClickhouse.DataLayer.Types do
   end
 
   def decode_value(value, _attr), do: value
+
+  defp decode_datetime(nil), do: nil
+  defp decode_datetime(%DateTime{} = value), do: value
+
+  defp decode_datetime(value) when is_binary(value) do
+    value
+    |> String.replace(" ", "T", global: false)
+    |> append_utc_timezone()
+    |> DateTime.from_iso8601()
+    |> case do
+      {:ok, datetime, _offset} -> datetime
+      _ -> value
+    end
+  end
+
+  defp decode_datetime(value), do: value
+
+  defp append_utc_timezone(value) do
+    if String.ends_with?(value, "Z") or Regex.match?(~r/[+-]\d{2}:\d{2}$/, value) do
+      value
+    else
+      value <> "Z"
+    end
+  end
 
   defp decode_integer(nil), do: nil
   defp decode_integer(value) when is_integer(value), do: value

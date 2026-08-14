@@ -13,7 +13,10 @@ defmodule AshClickhouse.DataLayer.Record do
   @doc """
   Decodes a single value list (positional, aligned to `columns`) into a record.
   """
-  @spec to_ash_record(maybe_improper_list(), module(), maybe_improper_list()) :: struct()
+  @spec to_ash_record(maybe_improper_list(), module(), maybe_improper_list() | nil) :: struct()
+  def to_ash_record(row, resource, columns) when is_list(row) and columns in [nil, []],
+    do: to_ash_record(row, resource)
+
   def to_ash_record(row, resource, columns)
       when is_list(row) and is_list(columns) and columns != [] do
     record_map =

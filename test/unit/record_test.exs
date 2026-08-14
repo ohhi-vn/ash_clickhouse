@@ -47,6 +47,22 @@ defmodule AshClickhouse.RecordTest do
     end
   end
 
+  describe "to_ash_record/3" do
+    test "falls back to attribute order when column metadata is unavailable" do
+      row = [
+        "123e4567-e89b-12d3-a456-426614174000",
+        "example",
+        "active"
+      ]
+
+      record = Record.to_ash_record(row, UuidAtomResource, nil)
+
+      assert record.id == "123e4567-e89b-12d3-a456-426614174000"
+      assert record.name == "example"
+      assert record.status == :active
+    end
+  end
+
   describe "to_existing_atom/1" do
     test "returns the existing atom for a known string" do
       _ = :ready

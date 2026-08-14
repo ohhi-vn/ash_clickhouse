@@ -237,9 +237,11 @@ defmodule AshClickhouse.DataLayer do
     result =
       Telemetry.span(resource, :read, query, fn ->
         case repo.query(query, params, opts) do
-          {:ok, %ClickHouse.Result{rows: rows, columns: columns}} ->
-            records =
-              rows
+           {:ok, %ClickHouse.Result{rows: rows, columns: columns}} ->
+             columns = columns || query_columns(data_layer_query)
+
+             records =
+               rows
               |> Enum.map(&Record.to_ash_record(&1, resource, columns))
 
             {:ok, records}

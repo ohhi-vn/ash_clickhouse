@@ -213,11 +213,11 @@ defmodule AshClickhouse.DataLayer.Insert do
   # and leave maps/arrays as native JSON values. Decimal structs are rendered as
   # numeric strings (Jason does not understand them natively).
   defp encode_bulk_value(%DateTime{} = value, _name, _resource),
-    do: DateTime.to_unix(value, :second)
+    do: DateTime.to_unix(value, :microsecond)
 
   defp encode_bulk_value(%NaiveDateTime{} = value, _name, _resource) do
     case DateTime.from_naive(value, "Etc/UTC") do
-      {:ok, dt} -> DateTime.to_unix(dt, :second)
+      {:ok, dt} -> DateTime.to_unix(dt, :microsecond)
       _ -> value
     end
   end
