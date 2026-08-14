@@ -5,6 +5,10 @@ defmodule AshClickhouse.Schema do
 
   @callback repo() :: module()
   @callback change() :: [String.t()]
+  @callback version() :: String.t()
+  @callback down() :: [String.t()]
+
+  @optional_callbacks version: 0, down: 0
 
   defmacro __using__(_opts) do
     quote do

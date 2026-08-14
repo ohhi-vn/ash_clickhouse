@@ -64,7 +64,13 @@ defmodule AshClickhouse.MigrationDefaultsTest do
     defmodule ExistingColumnsRepo do
       def query(_statement, _params) do
         {:ok,
-         %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [["id"]], columns: ["name"]}}
+         %ClickHouse.Result{
+           raw: "",
+           meta: %{},
+           compressed: false,
+           rows: [["id"]],
+           columns: ["name"]
+         }}
       end
 
       def database, do: "custom_db"
@@ -72,7 +78,8 @@ defmodule AshClickhouse.MigrationDefaultsTest do
 
     defmodule NoIndexRepo do
       def query(_statement, _params) do
-        {:ok, %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: ["name"]}}
+        {:ok,
+         %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: ["name"]}}
       end
 
       def database, do: "custom_db"
@@ -165,7 +172,8 @@ defmodule AshClickhouse.MigrationDefaultsTest do
     end
 
     test "warns when both type and expression differ" do
-      {statements, [warning]} = Migration.alter_indexes_cql(MismatchIndexResource, BothMismatchRepo)
+      {statements, [warning]} =
+        Migration.alter_indexes_cql(MismatchIndexResource, BothMismatchRepo)
 
       assert statements == []
       assert warning =~ "BOTH type and expression"

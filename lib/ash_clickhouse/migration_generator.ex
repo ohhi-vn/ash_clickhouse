@@ -9,7 +9,7 @@ defmodule AshClickhouse.MigrationGenerator do
   @spec generate(keyword()) :: :ok
   def generate(opts \\ []) do
     opts = options(opts)
-    resources = Helpers.find_resources()
+    resources = opts.resources || Helpers.find_resources()
 
     results =
       resources
@@ -48,6 +48,7 @@ defmodule AshClickhouse.MigrationGenerator do
       dev: Keyword.get(opts, :dev, false),
       dry_run: Keyword.get(opts, :dry_run, false),
       check: Keyword.get(opts, :check, false),
+      resources: Keyword.get(opts, :resources),
       migration_path: Keyword.get(opts, :migration_path, "priv/repo/migrations"),
       snapshot_path: Keyword.get(opts, :snapshot_path, "priv/repo/resource_snapshots")
     }
@@ -63,12 +64,12 @@ defmodule AshClickhouse.MigrationGenerator do
     previous = read_snapshot(snapshot_path)
     changed? = previous != current
 
-    if not changed? do
-      %{files: []}
-    else
+    if changed? do
       migration = migration_file(resource, repo, current, previous, migration_path, opts)
       snapshot_file = {snapshot_path, Jason.encode!(current, pretty: true) <> "\n"}
       %{files: [migration, snapshot_file]}
+    else
+      %{files: []}
     end
   end
 
@@ -105,12 +106,12 @@ defmodule AshClickhouse.MigrationGenerator do
   end
 
   defp migration_file(resource, repo, current, previous, migration_path, opts) do
-    statements = migration_statements(resource, current, previous)
+    {statements, down} = migration_statements(resource, current, previous)
     safe_key = String.replace(resource_key(resource), ".", "_")
     suffix = if opts.dev, do: "_dev", else: ""
-    timestamp = timestamp()
+    version = timestamp()
     name = opts.name || "migrate"
-    filename = "#{timestamp}_#{name}_#{safe_key}#{suffix}.exs"
+    filename = "#{version}_#{name}_#{safe_key}#{suffix}.exs"
     module = "AshClickhouse.Migrations.#{Macro.camelize(name)}#{Macro.camelize(safe_key)}"
 
     contents = """
@@ -122,8 +123,16 @@ defmodule AshClickhouse.MigrationGenerator do
       def repo, do: #{inspect(repo)}
 
       @impl AshClickhouse.Schema
+      def version, do: "#{version}"
+
+      @impl AshClickhouse.Schema
       def change do
         #{inspect(statements)}
+      end
+
+      @impl AshClickhouse.Schema
+      def down do
+        #{inspect(down)}
       end
     end
     """
@@ -131,8 +140,10 @@ defmodule AshClickhouse.MigrationGenerator do
     {Path.join(migration_path, filename), contents}
   end
 
-  defp migration_statements(resource, _current, nil),
-    do: Migration.generate_resource_cql(resource)
+  defp migration_statements(resource, _current, nil) do
+    down = [drop_table_cql(resource)]
+    {Migration.generate_resource_cql(resource), down}
+  end
 
   defp migration_statements(resource, current, previous) do
     table = AshClickhouse.DataLayer.source(resource)
@@ -145,6 +156,13 @@ defmodule AshClickhouse.MigrationGenerator do
         "ALTER TABLE #{quote_name(table)} ADD COLUMN IF NOT EXISTS #{quote_name(attr["name"])} #{attr["type"]}"
       end)
 
+    column_downs =
+      current["attributes"]
+      |> Enum.reject(&MapSet.member?(old_names, &1["name"]))
+      |> Enum.map(fn attr ->
+        "ALTER TABLE #{quote_name(table)} DROP COLUMN IF NOT EXISTS #{quote_name(attr["name"])}"
+      end)
+
     old_indexes = MapSet.new(previous["indexes"] || [], & &1["name"])
 
     indexes =
@@ -154,7 +172,27 @@ defmodule AshClickhouse.MigrationGenerator do
         "ALTER TABLE #{quote_name(table)} ADD INDEX IF NOT EXISTS #{quote_name(index["name"])} (#{index["expression"]}) TYPE #{index["type"]} GRANULARITY #{index["granularity"]}"
       end)
 
-    columns ++ indexes
+    index_downs =
+      current["indexes"]
+      |> Enum.reject(&MapSet.member?(old_indexes, &1["name"]))
+      |> Enum.map(fn index ->
+        "ALTER TABLE #{quote_name(table)} DROP INDEX IF NOT EXISTS #{quote_name(index["name"])}"
+      end)
+
+    {columns ++ indexes, column_downs ++ index_downs}
+  end
+
+  defp drop_table_cql(resource) do
+    table = quote_name(AshClickhouse.DataLayer.source(resource))
+    database = Dsl.database(resource)
+
+    qualified =
+      case database do
+        nil -> table
+        db -> "#{quote_name(db)}.#{table}"
+      end
+
+    "DROP TABLE IF EXISTS #{qualified}"
   end
 
   defp read_snapshot(path) do

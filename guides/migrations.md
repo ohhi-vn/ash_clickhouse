@@ -120,6 +120,70 @@ expressions), so treat a `type` mismatch as authoritative and double-check
 Column types are derived from Ash attribute types. See [Types](types.md) for
 the complete table.
 
+## Production releases
+
+Mix is not available inside an OTP release, so migrations must be run through
+`AshClickhouse.Release`, which runs the same versioned pipeline as the mix task
+without any Mix dependency.
+
+Add a small release wrapper to your project:
+
+```elixir
+defmodule MyApp.Release do
+  @app :my_app
+
+  def migrate do
+    load_app()
+
+    for repo <- repos() do
+      AshClickhouse.Release.migrate(repo, repos())
+    end
+  end
+
+  def rollback(repo, version) do
+    load_app()
+    AshClickhouse.Release.rollback(repo, version, repos())
+  end
+
+  defp repos do
+    Application.fetch_env!(@app, :ash_clickhouse_repos)
+  end
+
+  defp load_app do
+    Application.load(@app)
+  end
+end
+```
+
+Then run it from the release:
+
+```sh
+bin/my_app eval "MyApp.Release.migrate"
+bin/my_app eval "MyApp.Release.rollback(MyApp.Repo, :all)"
+```
+
+Configure the repos to migrate:
+
+```elixir
+config :my_app, :ash_clickhouse_repos, [MyApp.Repo]
+```
+
+### How it works
+
+`migrate/3` applies the `*.exs` migration files under
+`priv/repo/migrations` in version order. Each applied file is recorded in a
+`schema_migrations` table on the target database, so re-running a release
+migrate is idempotent — already-applied files are skipped. It creates the
+database first (disable with `create_database: false`) and only starts a
+connection when the repo is a real `AshClickhouse.Repo`.
+
+`rollback/3` rolls applied migrations back to a target version, executing each
+file's `down/0` statements and removing its record from `schema_migrations`.
+Pass `:all` (or `nil`/`0`) to roll back every applied migration. Files that
+predate `down/0` support fall back to
+`AshClickhouse.Migration.reverse_statement/1` over their `change/0`
+statements; statements that cannot be reversed are skipped with a warning.
+
 ## Tips
 
 - Always set `order_by` — most ClickHouse engines require it.

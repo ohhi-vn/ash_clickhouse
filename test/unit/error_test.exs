@@ -22,7 +22,9 @@ defmodule AshClickhouse.ErrorTest do
 
     test "from_error/1 inspects an arbitrary term as the message" do
       err = Error.ClickhouseError.from_error({:custom, :reason})
-      assert %Error.ClickhouseError{message: "{:custom, :reason}", reason: {:custom, :reason}} = err
+
+      assert %Error.ClickhouseError{message: "{:custom, :reason}", reason: {:custom, :reason}} =
+               err
     end
 
     test "exception/1 builds from a binary or keyword list" do

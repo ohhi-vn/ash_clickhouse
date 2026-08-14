@@ -51,6 +51,13 @@ defmodule AshClickhouse.Repo do
         Keyword.get(config, :database)
       end
 
+      @doc "Returns the OTP app this repo is configured for."
+      @impl AshClickhouse.Repo
+      @spec otp_app() :: atom() | nil
+      def otp_app do
+        @otp_app
+      end
+
       @doc "Returns the connection struct."
       @impl AshClickhouse.Repo
       @spec connection() :: AshClickhouse.Connection.t() | nil
@@ -143,6 +150,7 @@ defmodule AshClickhouse.Repo do
 
   @callback config() :: keyword()
   @callback database() :: String.t() | nil
+  @callback otp_app() :: atom() | nil
   @callback connection() :: AshClickhouse.Connection.t() | nil
   @callback create_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
   @callback drop_database(String.t() | nil) :: {:ok, term()} | {:error, term()}

@@ -100,6 +100,13 @@ defmodule AshClickhouse.ConnectionTest do
     end
   end
 
+  describe "query/4 with a pid connection" do
+    test "resolves a pid connection and wraps the client failure" do
+      assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
+               Connection.query(self(), "SELECT 1", [])
+    end
+  end
+
   describe "query/4 and query!/4" do
     test "query returns {:error, ClickhouseError} for an unknown connection" do
       assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
@@ -125,7 +132,12 @@ defmodule AshClickhouse.ConnectionTest do
 
       # Register a struct whose client atom is intentionally unregistered so the
       # query fails fast (no server round-trip) after resolving the name.
-      :persistent_term.put(key, %Connection{conn: :no_such_resolved_client, database: nil, name: name})
+      :persistent_term.put(key, %Connection{
+        conn: :no_such_resolved_client,
+        database: nil,
+        name: name
+      })
+
       on_exit(fn -> :persistent_term.erase(key) end)
 
       assert {:error, %AshClickhouse.Error.ClickhouseError{}} =

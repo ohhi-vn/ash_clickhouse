@@ -26,6 +26,18 @@ defmodule AshClickhouse.DataLayer.ExtensionTest do
     def database, do: "test_db"
   end
 
+  defmodule AlterRepo do
+    def query("SELECT 1 FROM system.tables" <> _, _params), do: {:ok, result([[1]])}
+    def query("SELECT name FROM system.columns" <> _, _params), do: {:ok, result([["id"]])}
+    def query(_statement, _params), do: {:ok, result([])}
+
+    def database, do: "test_db"
+
+    defp result(rows) do
+      %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: rows, columns: []}
+    end
+  end
+
   defmodule MigrateResource do
     use Ash.Resource,
       data_layer: AshClickhouse.DataLayer,
@@ -36,6 +48,26 @@ defmodule AshClickhouse.DataLayer.ExtensionTest do
     clickhouse do
       table("migrate_table")
       repo(FakeRepo)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:name, :string)
+    end
+  end
+
+  defmodule AlterResource do
+    use Ash.Resource,
+      data_layer: AshClickhouse.DataLayer,
+      domain: nil
+
+    import AshClickhouse.DataLayer.Dsl.Macros
+
+    clickhouse do
+      table("alter_table")
+      repo(AlterRepo)
+
+      index(name: :idx_name, expression: "name", type: "minmax")
     end
 
     attributes do
@@ -145,10 +177,11 @@ defmodule AshClickhouse.DataLayer.ExtensionTest do
     test "prints ALTER statements for missing columns and indexes" do
       output =
         capture_io(fn ->
-          assert Extension.codegen(["--dry-run"], [MigrateResource]) == :ok
+          assert Extension.codegen(["--dry-run"], [AlterResource]) == :ok
         end)
 
-      assert output =~ "ALTER TABLE `migrate_table` ADD COLUMN IF NOT EXISTS"
+      assert output =~ "ALTER TABLE `alter_table` ADD COLUMN IF NOT EXISTS `name`"
+      assert output =~ "ALTER TABLE `alter_table` ADD INDEX IF NOT EXISTS `idx_name`"
     end
 
     test "prints nothing pending and reports when there are no changes" do

@@ -138,13 +138,27 @@ defmodule AshClickhouse.AggregateTest do
 
   defmodule OkRepo do
     def query(_sql, _params, _opts) do
-      {:ok, %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [["7"]], columns: ["result"]}}
+      {:ok,
+       %ClickHouse.Result{
+         raw: "",
+         meta: %{},
+         compressed: false,
+         rows: [["7"]],
+         columns: ["result"]
+       }}
     end
   end
 
   defmodule BatchRepo do
     def query(_sql, _params, _opts) do
-      {:ok, %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [["t1", "7"]], columns: ["id", "result"]}}
+      {:ok,
+       %ClickHouse.Result{
+         raw: "",
+         meta: %{},
+         compressed: false,
+         rows: [["t1", "7"]],
+         columns: ["id", "result"]
+       }}
     end
   end
 
@@ -168,7 +182,14 @@ defmodule AshClickhouse.AggregateTest do
 
   defmodule MedianRepo do
     def query(_sql, _params, _opts) do
-      {:ok, %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [["id-1", "7"]], columns: ["id", "result"]}}
+      {:ok,
+       %ClickHouse.Result{
+         raw: "",
+         meta: %{},
+         compressed: false,
+         rows: [["id-1", "7"]],
+         columns: ["id", "result"]
+       }}
     end
   end
 
@@ -259,7 +280,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "composite pk same-table aggregate falls back to default_value" do
       records = [struct(CompositeResource, id: "1", code: "a")]
-      agg = %{kind: :count, name: :c, field: nil, relationship_path: [], resource: CompositeResource, default_value: 0}
+
+      agg = %{
+        kind: :count,
+        name: :c,
+        field: nil,
+        relationship_path: [],
+        resource: CompositeResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], CompositeResource, OkRepo, [])
       assert record.aggregates[:c] == 0
@@ -267,7 +296,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "multi-hop relationship path falls back to default_value" do
       records = [struct(UserResource, id: "1", age: 30)]
-      agg = %{kind: :count, name: :c, field: nil, relationship_path: [:a, :b], resource: UserResource, default_value: 0}
+
+      agg = %{
+        kind: :count,
+        name: :c,
+        field: nil,
+        relationship_path: [:a, :b],
+        resource: UserResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], UserResource, OkRepo, [])
       assert record.aggregates[:c] == 0
@@ -275,7 +312,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "belongs_to with a composite-pk related resource falls back to default_value" do
       records = [struct(CompositeMemberResource, id: "m1", team_id: "t1")]
-      agg = %{kind: :count, name: :c, field: nil, relationship_path: [:team], resource: CompositeMemberResource, default_value: 0}
+
+      agg = %{
+        kind: :count,
+        name: :c,
+        field: nil,
+        relationship_path: [:team],
+        resource: CompositeMemberResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], CompositeMemberResource, OkRepo, [])
       assert record.aggregates[:c] == 0
@@ -283,7 +328,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "belongs_to with a single-pk related resource batches a query" do
       records = [struct(MemberResource, id: "m1", team_id: "t1")]
-      agg = %{kind: :count, name: :c, field: nil, relationship_path: [:team], resource: MemberResource, default_value: 0}
+
+      agg = %{
+        kind: :count,
+        name: :c,
+        field: nil,
+        relationship_path: [:team],
+        resource: MemberResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], MemberResource, BatchRepo, [])
       assert record.aggregates[:c] == 7
@@ -291,7 +344,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "unknown aggregate kind falls through to the raw value" do
       records = [struct(UserResource, id: "id-1", age: 30)]
-      agg = %{kind: :median, name: :m, field: :age, relationship_path: [], resource: UserResource, default_value: 0}
+
+      agg = %{
+        kind: :median,
+        name: :m,
+        field: :age,
+        relationship_path: [],
+        resource: UserResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], UserResource, MedianRepo, [])
       assert record.aggregates[:m] == "7"
@@ -299,7 +360,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "normalizes a 16-byte uuid key from the batched query" do
       records = [struct(UserResource, id: "123e4567-e89b-12d3-a456-426614174000", age: 30)]
-      agg = %{kind: :sum, name: :s, field: :age, relationship_path: [], resource: UserResource, default_value: 0}
+
+      agg = %{
+        kind: :sum,
+        name: :s,
+        field: :age,
+        relationship_path: [],
+        resource: UserResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], UserResource, UuidBatchRepo, [])
       assert record.aggregates[:s] == 5
@@ -307,7 +376,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "same-table batch falls back to default_value when the query fails" do
       records = [struct(UserResource, id: "id-1", age: 30)]
-      agg = %{kind: :sum, name: :s, field: :age, relationship_path: [], resource: UserResource, default_value: 0}
+
+      agg = %{
+        kind: :sum,
+        name: :s,
+        field: :age,
+        relationship_path: [],
+        resource: UserResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], UserResource, ErrRepo, [])
       assert record.aggregates[:s] == 0
@@ -315,7 +392,15 @@ defmodule AshClickhouse.AggregateTest do
 
     test "belongs_to batch falls back to default_value when the query fails" do
       records = [struct(MemberResource, id: "m1", team_id: "t1")]
-      agg = %{kind: :count, name: :c, field: nil, relationship_path: [:team], resource: MemberResource, default_value: 0}
+
+      agg = %{
+        kind: :count,
+        name: :c,
+        field: nil,
+        relationship_path: [:team],
+        resource: MemberResource,
+        default_value: 0
+      }
 
       [record] = Aggregate.attach(records, [agg], MemberResource, ErrRepo, [])
       assert record.aggregates[:c] == 0

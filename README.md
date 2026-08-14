@@ -95,6 +95,9 @@ mix ash_clickhouse.setup
 mix ash_clickhouse.migrate
 ```
 
+For production releases (no Mix available), use
+[`AshClickhouse.Release`](guides/migrations.md#production-releases).
+
 ### 5. Use it
 
 ```elixir

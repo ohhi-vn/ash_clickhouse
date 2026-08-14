@@ -404,4 +404,59 @@ defmodule AshClickhouse.Migration do
   def generate_resource_cql(resource) do
     [create_table_cql(resource)]
   end
+
+  @doc """
+  Returns the inverse of a generated migration statement, or `nil` when it
+  cannot be reversed.
+
+  Used as a fallback for rolling back migration files that predate `down/0`
+  support. Handles the statements this library generates:
+
+    * `CREATE TABLE IF NOT EXISTS <t> (...)` → `DROP TABLE IF EXISTS <t>`
+    * `ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <c> <type>` →
+      `ALTER TABLE <t> DROP COLUMN IF NOT EXISTS <c>`
+    * `ALTER TABLE <t> ADD INDEX IF NOT EXISTS <n> (...)` →
+      `ALTER TABLE <t> DROP INDEX IF NOT EXISTS <n>`
+
+  Any other statement returns `nil` — callers must warn rather than guess.
+  """
+  @spec reverse_statement(String.t()) :: String.t() | nil
+  def reverse_statement("CREATE TABLE IF NOT EXISTS " <> rest) do
+    {table, _} = first_token(rest)
+    "DROP TABLE IF EXISTS #{table}"
+  end
+
+  def reverse_statement("CREATE TABLE " <> rest) do
+    {table, _} = first_token(rest)
+    "DROP TABLE IF EXISTS #{table}"
+  end
+
+  def reverse_statement("ALTER TABLE " <> rest) do
+    {table, body} = first_token(rest)
+
+    cond do
+      String.starts_with?(body, "ADD COLUMN IF NOT EXISTS ") ->
+        {column, _} = first_token(String.trim_leading(body, "ADD COLUMN IF NOT EXISTS "))
+        "ALTER TABLE #{table} DROP COLUMN IF NOT EXISTS #{column}"
+
+      String.starts_with?(body, "ADD INDEX IF NOT EXISTS ") ->
+        {name, _} = first_token(String.trim_leading(body, "ADD INDEX IF NOT EXISTS "))
+        "ALTER TABLE #{table} DROP INDEX IF NOT EXISTS #{name}"
+
+      true ->
+        nil
+    end
+  end
+
+  def reverse_statement(_), do: nil
+
+  defp first_token(string) do
+    string = String.trim(string)
+
+    case String.split(string, " ", parts: 2) do
+      [head, tail] -> {head, tail}
+      [head] -> {head, ""}
+      [] -> {"", ""}
+    end
+  end
 end

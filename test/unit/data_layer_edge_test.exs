@@ -111,7 +111,17 @@ defmodule AshClickhouse.DataLayerEdgeTest do
 
     def insert_rows(_table, _statement, rows, _opts) do
       record({:insert_rows, length(rows)})
-      {:ok, :ok}
+
+      case Agent.get(__MODULE__, & &1.mode) do
+        :insert_error ->
+          {:error, "insert failed"}
+
+        :clickhouse_error ->
+          {:error, %AshClickhouse.Error.ClickhouseError{message: "boom"}}
+
+        _ ->
+          {:ok, :ok}
+      end
     end
 
     def database, do: "ash_clickhouse_test"
@@ -287,6 +297,11 @@ defmodule AshClickhouse.DataLayerEdgeTest do
       assert {:ok, %{}} = DataLayer.run_aggregate_query(q, [], FakeResource)
     end
 
+    test "builds an empty where clause when filters are nil" do
+      q = %{DataLayer.resource_to_query(FakeResource, nil) | filters: nil}
+      assert {:ok, %{}} = DataLayer.run_aggregate_query(q, [], FakeResource)
+    end
+
     test "decodes aggregate values from a result row" do
       FakeRepo.set_mode(FakeRepo, :aggregate)
       q = DataLayer.resource_to_query(FakeResource, nil)
@@ -373,6 +388,16 @@ defmodule AshClickhouse.DataLayerEdgeTest do
       assert length(q2.filters) == 1
     end
 
+    test "stores the tenant directly when the resource is nil" do
+      q = DataLayer.resource_to_query(FakeResource, nil)
+      assert {:ok, %Query{tenant: "t1"}} = DataLayer.set_tenant(nil, q, "t1")
+    end
+
+    test "stores the tenant directly when the resource has no multitenancy" do
+      q = DataLayer.resource_to_query(FakeResource, nil)
+      assert {:ok, %Query{tenant: "t1"}} = DataLayer.set_tenant(FakeResource, q, "t1")
+    end
+
     test "attribute strategy with no configured attribute stores the tenant" do
       q = DataLayer.resource_to_query(TenantNoAttrResource, nil)
       {:ok, q2} = DataLayer.set_tenant(TenantNoAttrResource, q, "org_1")
@@ -422,6 +447,24 @@ defmodule AshClickhouse.DataLayerEdgeTest do
       {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
       refute Map.has_key?(record, :nope)
     end
+
+    test "an anonymous function (expr) calculation is applied to each record" do
+      q = DataLayer.resource_to_query(FakeResource, nil)
+      calc = %{name: :doubled_age, expr: fn record -> record.age * 2 end}
+      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
+
+      {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
+      assert Map.get(record, :doubled_age) == 60
+    end
+
+    test "a calculation with neither module nor expr is ignored" do
+      q = DataLayer.resource_to_query(FakeResource, nil)
+      calc = %{name: :mystery}
+      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
+
+      {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
+      refute Map.has_key?(record, :mystery)
+    end
   end
 
   describe "aggregate attachment in run_query/2" do
@@ -462,6 +505,166 @@ defmodule AshClickhouse.DataLayerEdgeTest do
       changeset = Ash.Changeset.for_update(record, :update, %{})
       assert {:ok, %FakeResource{} = result} = DataLayer.update(FakeResource, changeset)
       assert result.name == "alice"
+    end
+
+    test "returns an error when the UPDATE query fails" do
+      FakeRepo.set_mode(FakeRepo, :error)
+      record = struct(FakeResource, id: "id-1", name: "alice", email: "a@x", age: 30)
+      changeset = Ash.Changeset.for_update(record, :update, %{name: "bob"})
+
+      assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
+               DataLayer.update(FakeResource, changeset)
+    end
+  end
+
+  # ── destroy/2 error path ───────────────────────────────────────────────────────
+
+  describe "destroy/2" do
+    test "returns an error when the DELETE query fails" do
+      FakeRepo.set_mode(FakeRepo, :error)
+      record = struct(FakeResource, id: "id-1", name: "alice", email: "a@x", age: 30)
+      changeset = Ash.Changeset.for_destroy(record, :destroy)
+
+      assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
+               DataLayer.destroy(FakeResource, changeset)
+    end
+  end
+
+  # ── create/2 error paths ───────────────────────────────────────────────────────
+
+  describe "create/2" do
+    test "wraps a raw insert error into a ClickhouseError" do
+      FakeRepo.set_mode(FakeRepo, :insert_error)
+      changeset = Ash.Changeset.for_create(FakeResource, :create, %{name: "alice"})
+
+      assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
+               DataLayer.create(FakeResource, changeset)
+    end
+
+    test "passes an already-wrapped ClickhouseError through unchanged" do
+      FakeRepo.set_mode(FakeRepo, :clickhouse_error)
+      changeset = Ash.Changeset.for_create(FakeResource, :create, %{name: "alice"})
+
+      assert {:error, %AshClickhouse.Error.ClickhouseError{message: "boom"}} =
+               DataLayer.create(FakeResource, changeset)
+    end
+  end
+
+  # ── bulk_create/3 edge cases ──────────────────────────────────────────────────
+
+  describe "bulk_create/3 options" do
+    test "returns an error when insert_rows fails" do
+      FakeRepo.set_mode(FakeRepo, :insert_error)
+      changesets = [Ash.Changeset.for_create(FakeResource, :create, %{name: "alice"})]
+
+      assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
+               DataLayer.bulk_create(FakeResource, changesets, [])
+    end
+
+    test "accepts options as a map" do
+      FakeRepo.set_mode(FakeRepo, :rows)
+      changesets = [Ash.Changeset.for_create(FakeResource, :create, %{name: "alice"})]
+
+      assert {:ok, _} =
+               DataLayer.bulk_create(FakeResource, changesets, %{
+                 return_records?: false,
+                 batch_size: 1
+               })
+    end
+  end
+
+  # ── can?/2 feature matrix ──────────────────────────────────────────────────────
+
+  describe "can?/2" do
+    test "unsupported combination/tuple features return false" do
+      resource = FakeResource
+      assert DataLayer.can?(resource, {:combine, :union}) == false
+      assert DataLayer.can?(resource, {:join, :inner}) == false
+      assert DataLayer.can?(resource, {:filter_relationship, :foo}) == false
+      assert DataLayer.can?(resource, {:exists, :unrelated}) == false
+      assert DataLayer.can?(resource, {:aggregate_relationship, :foo}) == false
+    end
+
+    test "supported aggregate kinds return true, others false" do
+      for kind <- [:count, :sum, :avg, :min, :max] do
+        assert DataLayer.can?(FakeResource, {:aggregate, kind})
+        assert DataLayer.can?(FakeResource, {:query_aggregate, kind})
+      end
+
+      assert DataLayer.can?(FakeResource, {:aggregate, :custom}) == false
+      assert DataLayer.can?(FakeResource, {:query_aggregate, :list}) == false
+    end
+
+    test "filter_expr and sort tuples are supported" do
+      assert DataLayer.can?(FakeResource, {:filter_expr, :foo})
+      assert DataLayer.can?(FakeResource, {:sort, :name})
+    end
+
+    test "explicitly unsupported features return false" do
+      for feature <- [
+            :transact,
+            :lock,
+            :keyset,
+            :upsert,
+            :update_many,
+            :composite_type,
+            :through_relationship,
+            :expression_calculation_sort,
+            :aggregate_filter,
+            :aggregate_sort,
+            :bulk_create_with_partial_success,
+            :bulk_upsert_return_skipped
+          ] do
+        assert DataLayer.can?(FakeResource, feature) == false
+      end
+
+      assert DataLayer.can?(FakeResource, {:atomic, :foo}) == false
+    end
+
+    test "supported atom features and unknown terms" do
+      assert DataLayer.can?(FakeResource, :create)
+      assert DataLayer.can?(FakeResource, :read)
+      assert DataLayer.can?(FakeResource, :filter)
+      assert DataLayer.can?(FakeResource, :garbage) == false
+      assert DataLayer.can?(FakeResource, {:unknown_tuple, 1}) == false
+    end
+  end
+
+  # ── stream/3 ───────────────────────────────────────────────────────────────────
+
+  describe "stream/3" do
+    test "raises a client error when the client is unavailable" do
+      q = DataLayer.resource_to_query(FakeResource, nil)
+
+      assert_raise ArgumentError, fn ->
+        DataLayer.stream(q, FakeResource)
+      end
+    end
+
+    test "derives columns from the select list" do
+      q = %{DataLayer.resource_to_query(FakeResource, nil) | select: [:id, :name]}
+
+      assert_raise ArgumentError, fn ->
+        DataLayer.stream(q, FakeResource)
+      end
+    end
+
+    test "derives columns from the distinct list" do
+      q = %{DataLayer.resource_to_query(FakeResource, nil) | distinct: [:name]}
+
+      assert_raise ArgumentError, fn ->
+        DataLayer.stream(q, FakeResource)
+      end
+    end
+  end
+
+  # ── repo cache ─────────────────────────────────────────────────────────────────
+
+  describe "repo/1" do
+    test "recreates the cache table if it was deleted" do
+      :ets.delete(:ash_clickhouse_repo_cache)
+      assert DataLayer.repo(FakeResource) == AshClickhouse.DataLayerEdgeTest.FakeRepo
+      assert :ets.whereis(:ash_clickhouse_repo_cache) != :undefined
     end
   end
 end
