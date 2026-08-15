@@ -86,10 +86,10 @@ defmodule AshClickhouse.InsertTest do
 
       assert Enum.member?(fields, "`id`")
       assert values["`id`"] == uuid
-      assert values["`created_at`"] == 1_704_164_645
-      assert values["`starts_at`"] == 1_704_164_645
-      assert values["`day`"] == 739_252
-      assert values["`clock`"] == 11_045
+      assert values["`created_at`"] == 1_704_164_645_000_000
+      assert values["`starts_at`"] == 1_704_164_645_000_000
+      assert values["`day`"] == 19_724
+      assert values["`clock`"] == "03:04:05"
       assert values["`amount`"] == "12.34"
       assert values["`meta`"] == %{a: 1}
       assert values["`items`"] == ["x", "y"]

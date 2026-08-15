@@ -21,6 +21,7 @@ defmodule AshClickhouse.DataLayer.Insert do
   @spec build_insert_rows([map()], module()) :: {[String.t()], [list()]}
   def build_insert_rows(rows, resource) do
     attrs = Info.attributes(resource)
+    attr_map = Map.new(attrs, &{to_string(&1.name), &1})
 
     fields = Enum.map(attrs, &Identifier.quote_name(&1.name))
     field_atoms = Enum.map(attrs, & &1.name)
@@ -29,8 +30,11 @@ defmodule AshClickhouse.DataLayer.Insert do
       Enum.map(rows, fn row ->
         Enum.map(field_atoms, fn name ->
           case Map.fetch(row, to_string(name)) do
-            {:ok, value} -> encode_bulk_value(value, name, resource)
-            :error -> nil
+            {:ok, value} ->
+              encode_bulk_value(value, Map.fetch!(attr_map, to_string(name)), resource)
+
+            :error ->
+              nil
           end
         end)
       end)
@@ -212,30 +216,36 @@ defmodule AshClickhouse.DataLayer.Insert do
   # expects native JSON values, so we keep UUIDs as their canonical string form
   # and leave maps/arrays as native JSON values. Decimal structs are rendered as
   # numeric strings (Jason does not understand them natively).
-  defp encode_bulk_value(%DateTime{} = value, _name, _resource),
-    do: DateTime.to_unix(value, :second)
+  #
+  # Date/time values are encoded in the unit ClickHouse expects for the
+  # resolved column type:
+  #
+  #   * `DateTime64(N)` — integer number of microseconds since the Unix epoch
+  #     (the column's precision unit is 10^-N seconds).
+  #   * `DateTime` — integer number of seconds since the Unix epoch.
+  #   * `Date` — integer number of days since 1970-01-01.
+  #   * `Time` — the `"HH:MM:SS"` string (time columns are typed `String`).
+  defp encode_bulk_value(%DateTime{} = value, attr, _resource),
+    do: encode_datetime(value, attr)
 
-  defp encode_bulk_value(%NaiveDateTime{} = value, _name, _resource) do
+  defp encode_bulk_value(%NaiveDateTime{} = value, attr, _resource) do
     case DateTime.from_naive(value, "Etc/UTC") do
-      {:ok, dt} -> DateTime.to_unix(dt, :second)
+      {:ok, dt} -> encode_datetime(dt, attr)
       _ -> value
     end
   end
 
-  defp encode_bulk_value(%Date{} = value, _name, _resource) do
-    Date.to_erl(value) |> :calendar.date_to_gregorian_days()
-  end
+  defp encode_bulk_value(%Date{} = value, _attr, _resource),
+    do: Date.diff(value, ~D[1970-01-01])
 
-  defp encode_bulk_value(%Time{} = value, _name, _resource) do
-    case Time.to_erl(value) do
-      {h, m, s} -> h * 3600 + m * 60 + s
-    end
-  end
+  defp encode_bulk_value(%Time{} = value, _attr, _resource),
+    do: Time.to_string(value)
 
-  defp encode_bulk_value(%Decimal{} = value, _name, _resource),
+  defp encode_bulk_value(%Decimal{} = value, _attr, _resource),
     do: Decimal.to_string(value, :normal)
 
-  defp encode_bulk_value(value, name, resource) do
+  defp encode_bulk_value(value, attr, resource) do
+    name = attr.name
     uuid_fields = Types.uuid_attribute_names(resource)
 
     cond do
@@ -253,6 +263,13 @@ defmodule AshClickhouse.DataLayer.Insert do
 
       true ->
         value
+    end
+  end
+
+  defp encode_datetime(%DateTime{} = datetime, attr) do
+    case Types.resolve_attr_type(attr) do
+      "DateTime64(" <> _ -> DateTime.to_unix(datetime, :microsecond)
+      _ -> DateTime.to_unix(datetime, :second)
     end
   end
 end
