@@ -20,6 +20,10 @@ defmodule AshClickhouse.Repo do
   - `:username` / `:password` — credentials (default `"default"` / `""`)
   - `:database` — default database name
   - `:pool_size` — size of the connection pool (default `10`)
+  - `:ipv4_only` — resolve the URL host to an IPv4 address and connect to that
+    literal IP (default `false`). Set to `true` when the DNS server returns
+    `NXDOMAIN` for AAAA queries, which otherwise surfaces as a
+    `ClickHouse.ConnectionError` with message `"nxdomain"`.
   """
 
   @type config :: keyword()
@@ -169,7 +173,8 @@ defmodule AshClickhouse.Repo do
       database: Keyword.get(config, :database),
       pool_size: Keyword.get(config, :pool_size, 10),
       pool_timeout: Keyword.get(config, :pool_timeout, 30_000),
-      ping_retry: Keyword.get(config, :ping_retry, 30_000)
+      ping_retry: Keyword.get(config, :ping_retry, 30_000),
+      ipv4_only: Keyword.get(config, :ipv4_only, false)
     ]
   end
 end

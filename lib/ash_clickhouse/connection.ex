@@ -14,6 +14,11 @@ defmodule AshClickhouse.Connection do
   - `:username` / `:password` — credentials
   - `:database` — the default database
   - `:otp_app` — application to read config from (used by `AshClickhouse.Repo`)
+  - `:ipv4_only` — when `true`, resolve the URL host to an IPv4 address and
+    connect using that literal IP. Useful in environments where the DNS server
+    returns `NXDOMAIN` for AAAA queries (e.g. clusters with IPv6 disabled),
+    which otherwise makes the underlying `hackney` client fail with
+    `:nxdomain` even though the A record resolves. Defaults to `false`.
 
   The `clickhouse` client is started as a supervised GenServer. We keep a thin
   wrapper so that the data layer can resolve a connection by name and run
@@ -272,6 +277,8 @@ defmodule AshClickhouse.Connection do
 
   defp clickhouse_opts(opts) do
     url = Keyword.get(opts, :url, "http://localhost:8123")
+    ipv4_only = Keyword.get(opts, :ipv4_only, false)
+    url = maybe_resolve_ipv4(url, ipv4_only)
     name = Keyword.get(opts, :name, __MODULE__)
     pool_timeout = Keyword.get(opts, :pool_timeout, @default_pool_timeout)
     ping_retry = Keyword.get(opts, :ping_retry, @default_ping_retry)
@@ -290,5 +297,31 @@ defmodule AshClickhouse.Connection do
       ping_retry: ping_retry,
       pool_max_connections: pool_size
     ]
+  end
+
+  # When `ipv4_only` is set, resolve the URL host to an IPv4 address and swap
+  # it in. hackney's happy-eyeballs connect (`hackney_happy:getaddrs/1`)
+  # unconditionally performs both AAAA and A lookups; a DNS server that returns
+  # NXDOMAIN for AAAA (e.g. IPv6 disabled in a k8s cluster) makes both lookups
+  # come back empty from the client's perspective, yielding `:nxdomain`. Using
+  # a literal IP bypasses DNS entirely.
+  defp maybe_resolve_ipv4(url, true) do
+    case resolve_ipv4_host(url) do
+      {:ok, resolved_url} -> resolved_url
+      :error -> url
+    end
+  end
+
+  defp maybe_resolve_ipv4(url, _), do: url
+
+  defp resolve_ipv4_host(url) do
+    with %URI{host: host} when is_binary(host) <- URI.parse(url),
+         {:error, _} <- :inet.parse_address(String.to_charlist(host)),
+         {:ok, {:hostent, _, _, _, _, [addr | _]}} <-
+           :inet_res.getbyname(String.to_charlist(host), :a) do
+      {:ok, URI.parse(url) |> Map.put(:host, :inet.ntoa(addr) |> to_string()) |> URI.to_string()}
+    else
+      _ -> :error
+    end
   end
 end
