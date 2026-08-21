@@ -78,10 +78,18 @@ defmodule AshClickhouse.Error do
   def client_error?(%mod{}) when mod in @client_error_modules, do: true
   def client_error?(_), do: false
 
+  @doc false
+  # The concrete module list is intentionally not narrowed in the spec: the
+  # list mirrors the `clickhouse` client's error modules and callers only use
+  # it for `rescue ... in [...]` membership checks.
+  @dialyzer {:nowarn_function, client_error_modules: 0}
+  @spec client_error_modules() :: list()
+  def client_error_modules, do: @client_error_modules
+
   @doc """
   Wraps a ClickHouse client error into an Ash-compatible error.
   """
-  @spec wrap_clickhouse_error(term()) :: AshClickhouse.Error.ClickhouseError.t()
+  @spec wrap_clickhouse_error(term()) :: struct()
   def wrap_clickhouse_error(error) do
     ClickhouseError.from_error(error)
   end

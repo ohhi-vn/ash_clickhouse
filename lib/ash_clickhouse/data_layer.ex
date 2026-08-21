@@ -479,7 +479,7 @@ defmodule AshClickhouse.DataLayer do
       rows
       |> Enum.chunk_every(batch_size)
       |> Enum.reduce_while(:ok, fn chunk, _acc ->
-        case repo.insert_rows(qualified, statement, chunk, insert_opts) do
+        case repo.insert_rows(statement, chunk, insert_opts) do
           {:ok, _} -> {:cont, :ok}
           {:error, error} -> {:halt, {:error, error}}
         end
@@ -748,7 +748,7 @@ defmodule AshClickhouse.DataLayer do
     statement = Insert.insert_statement(qualified, fields)
     insert_opts = Insert.insert_opts(resource, [])
 
-    with {:ok, _} <- repo.insert_rows(qualified, statement, rows, insert_opts) do
+    with {:ok, _} <- repo.insert_rows(statement, rows, insert_opts) do
       {:ok, Record.to_ash_record(attrs, resource)}
     end
     |> handle_result()
@@ -772,7 +772,10 @@ defmodule AshClickhouse.DataLayer do
           pk_where
         ])
 
-      case repo.query(query, values ++ pk_values, build_opts(resource)) do
+      # Default `mutations_sync: 1` for single-row mutations: the per-row
+      # mutation is tiny, and waiting gives read-your-writes semantics so the
+      # returned record reflects the change immediately.
+      case repo.query(query, values ++ pk_values, build_opts(resource, changeset.context, 1)) do
         {:ok, _} -> {:ok, Record.to_ash_record(Map.merge(changeset.data, attrs), resource)}
         {:error, error} -> handle_result({:error, error})
       end
@@ -791,7 +794,7 @@ defmodule AshClickhouse.DataLayer do
         pk_where
       ])
 
-    case repo.query(query, pk_values, build_opts(resource)) do
+    case repo.query(query, pk_values, build_opts(resource, changeset.context, 1)) do
       {:ok, _} -> :ok
       {:error, error} -> handle_result({:error, error})
     end

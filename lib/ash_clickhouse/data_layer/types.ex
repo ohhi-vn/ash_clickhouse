@@ -26,6 +26,8 @@ defmodule AshClickhouse.DataLayer.Types do
   alias Ash.Resource.Info
   alias Ash.Type
 
+  require Logger
+
   @doc """
   Maps an Ash attribute type to a ClickHouse column type string.
   """
@@ -89,7 +91,29 @@ defmodule AshClickhouse.DataLayer.Types do
     "Tuple(#{inner})"
   end
 
-  # Fallback
+  # Fallback: unwrap Ash NewTypes (custom types defined with `use Ash.Type.NewType`)
+  # to their subtype so e.g. a NewType wrapping `:uuid` maps to `UUID` rather
+  # than silently becoming a `String` column (which would then mismatch the
+  # UUID binary parameters at runtime). Truly unknown types fall back to
+  # `String` with a warning so the misconfiguration surfaces in logs.
+  def ash_type_to_clickhouse(type) when is_atom(type) and type != nil do
+    cond do
+      function_exported?(type, :subtype_of, 0) ->
+        ash_type_to_clickhouse(type.subtype_of())
+
+      function_exported?(type, :type, 0) ->
+        ash_type_to_clickhouse(type.type())
+
+      true ->
+        Logger.warning(
+          "AshClickhouse: unknown Ash type #{inspect(type)} mapped to ClickHouse String. " <>
+            "Implement `storage_type/1` or `subtype_of/0` on the type for an explicit mapping."
+        )
+
+        "String"
+    end
+  end
+
   def ash_type_to_clickhouse(_type), do: "String"
 
   @doc """
@@ -121,21 +145,30 @@ defmodule AshClickhouse.DataLayer.Types do
 
   @doc """
   Returns the set of attribute names (atom and string) that are UUID-typed.
+
+  Results are cached per resource in ETS (the resource's attribute set is
+  immutable at runtime), so hot paths like per-row record decoding and bulk
+  value encoding don't re-scan the resource's attributes on every call.
   """
   @spec uuid_attribute_names(module()) :: MapSet.t()
-  def uuid_attribute_names(resource) do
-    resource
-    |> Info.attributes()
-    |> Enum.filter(fn attr ->
-      case attr.type do
-        Type.UUID -> true
-        :uuid -> true
-        _ -> false
-      end
+  def uuid_attribute_names(resource) when is_atom(resource) do
+    cached_resource_metadata(resource, :uuid_attribute_names, fn ->
+      resource
+      |> Info.attributes()
+      |> Enum.filter(fn attr ->
+        case attr.type do
+          Type.UUID -> true
+          :uuid -> true
+          _ -> false
+        end
+      end)
+      |> Enum.flat_map(fn attr -> [attr.name, to_string(attr.name)] end)
+      |> MapSet.new()
     end)
-    |> Enum.flat_map(fn attr -> [attr.name, to_string(attr.name)] end)
-    |> MapSet.new()
   end
+
+  # Legacy clause kept for callers that pass a precomputed attr map/struct.
+  def uuid_attribute_names(other), do: other
 
   @doc """
   Encodes an Ash attribute value into a ClickHouse-bindable value.
@@ -159,10 +192,10 @@ defmodule AshClickhouse.DataLayer.Types do
       Type.Time -> encode_time(value)
       :time -> encode_time(value)
       :time_usec -> encode_time(value)
-      Type.Array -> encode_list(value)
-      :array -> encode_list(value)
-      :list -> encode_list(value)
-      {:array, _} -> encode_list(value)
+      Type.Array -> encode_list(value, attr)
+      :array -> encode_list(value, attr)
+      :list -> encode_list(value, attr)
+      {:array, _} -> encode_list(value, attr)
       _ -> value
     end
   end
@@ -179,13 +212,29 @@ defmodule AshClickhouse.DataLayer.Types do
 
   defp encode_map(other), do: other
 
-  defp encode_list(nil), do: nil
+  defp encode_list(nil, _attr), do: nil
 
-  defp encode_list(list) when is_list(list) do
-    Enum.map(list, &to_string/1)
+  # Encode each element according to the array's element type. For
+  # `Array(String)` (the default for `:list`/`:array` without an inner type)
+  # elements are stringified; for typed arrays like `{:array, :integer}` the
+  # element values are passed through so the client emits native JSON numbers.
+  defp encode_list(list, attr) when is_list(list) do
+    element_type =
+      case attr.type do
+        {:array, inner} -> inner
+        _ -> nil
+      end
+
+    Enum.map(list, fn element ->
+      if element_type in [nil, :string, :atom, :ci_string, Type.String, Type.Atom, Type.CiString] do
+        to_string(element)
+      else
+        element
+      end
+    end)
   end
 
-  defp encode_list(other), do: other
+  defp encode_list(other, _attr), do: other
 
   defp encode_time(%Time{} = time), do: Time.to_string(time)
   defp encode_time(other), do: other
@@ -331,36 +380,86 @@ defmodule AshClickhouse.DataLayer.Types do
 
   @doc """
   Returns the set of attribute names (atom) that are Atom-typed.
+
+  Cached per resource — see `uuid_attribute_names/1`.
   """
   @spec atom_attribute_names(module()) :: MapSet.t(atom())
-  def atom_attribute_names(resource) do
-    resource
-    |> Info.attributes()
-    |> Enum.filter(fn attr ->
-      case attr.type do
-        Type.Atom -> true
-        :atom -> true
-        _ -> false
-      end
+  def atom_attribute_names(resource) when is_atom(resource) do
+    cached_resource_metadata(resource, :atom_attribute_names, fn ->
+      resource
+      |> Info.attributes()
+      |> Enum.filter(fn attr ->
+        case attr.type do
+          Type.Atom -> true
+          :atom -> true
+          _ -> false
+        end
+      end)
+      |> Enum.map(& &1.name)
+      |> MapSet.new()
     end)
-    |> Enum.map(& &1.name)
-    |> MapSet.new()
   end
+
+  def atom_attribute_names(other), do: other
 
   @doc """
   Builds a map of attribute name => ClickHouse type string for a resource.
+
+  Cached per resource — see `uuid_attribute_names/1`.
   """
   @spec attr_type_map(module()) :: %{(atom() | String.t()) => String.t()}
-  def attr_type_map(resource) do
-    resource
-    |> Info.attributes()
-    |> Enum.reduce(%{}, fn attr, acc ->
-      type = resolve_attr_type(attr)
+  def attr_type_map(resource) when is_atom(resource) do
+    cached_resource_metadata(resource, :attr_type_map, fn ->
+      resource
+      |> Info.attributes()
+      |> Enum.reduce(%{}, fn attr, acc ->
+        type = resolve_attr_type(attr)
 
-      acc
-      |> Map.put(attr.name, type)
-      |> Map.put(to_string(attr.name), type)
+        acc
+        |> Map.put(attr.name, type)
+        |> Map.put(to_string(attr.name), type)
+      end)
     end)
+  end
+
+  def attr_type_map(other), do: other
+
+  # --- per-resource metadata cache -------------------------------------------
+
+  @metadata_cache :ash_clickhouse_resource_metadata
+
+  # Reads/writes a lazily-computed value keyed by {resource, key} in a public
+  # ETS table. The resource's attribute definitions are immutable at runtime,
+  # so the cache is safe for the life of the VM (same lifetime as the existing
+  # `:ash_clickhouse_repo_cache`). Concurrent first-time lookups may both
+  # compute the value; the last write wins and both results are identical.
+  defp cached_resource_metadata(resource, key, compute) do
+    ensure_metadata_cache()
+
+    case :ets.lookup(@metadata_cache, {resource, key}) do
+      [{{^resource, ^key}, value}] ->
+        value
+
+      [] ->
+        value = compute.()
+        :ets.insert(@metadata_cache, {{resource, key}, value})
+        value
+    end
+  end
+
+  defp ensure_metadata_cache do
+    case :ets.whereis(@metadata_cache) do
+      :undefined ->
+        try do
+          _table = :ets.new(@metadata_cache, [:named_table, :public, {:read_concurrency, true}])
+          :ok
+        rescue
+          ArgumentError -> :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   @doc """
@@ -412,7 +511,7 @@ defmodule AshClickhouse.DataLayer.Types do
   merely looked like a UUID — including legitimate `:string` business
   identifiers (order numbers, etc.).
   """
-  @spec convert_uuid_param(term(), term(), MapSet.t()) :: term()
+  @spec convert_uuid_param(term(), term(), MapSet.t() | list()) :: term()
   def convert_uuid_param(value, column, uuid_fields) do
     # UUID values are passed to ClickHouse as `?` parameters and encoded by the
     # client's `DataType.encode`, which wraps binaries in single quotes and

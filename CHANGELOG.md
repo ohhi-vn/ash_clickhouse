@@ -1,8 +1,67 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 ### Features
+
+- **`contains` is now configurable as case-sensitive** via
+  `config :ash_clickhouse, :case_sensitive_contains, true` (uses `position()`
+  instead of `positionCaseInsensitive()`), matching the case-sensitivity of
+  `starts_with`/`ends_with`. Defaults to the historical case-insensitive
+  behaviour.
+- **`like` / `ilike` filters are now supported**, translating to ClickHouse
+  `LIKE` / `ILIKE`.
+- **Ash NewTypes are unwrapped in DDL type mapping.** A NewType wrapping e.g.
+  `:uuid` now maps to `UUID` instead of silently becoming a `String` column;
+  truly unknown types fall back to `String` with a warning.
+- **Typed array attributes encode element values natively.** For arrays like
+  `{:array, :integer}` elements are passed through so the client emits native
+  JSON numbers; only string-ish element types are stringified.
+- **Added GitHub Actions CI workflow** (`.github/`).
+
+### Bug fixes
+
+- **`Connection.query/4` no longer swallows genuine bugs.** Only client error
+  modules (including `ArgumentError` from the client) are converted to a
+  normalized error tuple; any other exception propagates with its original
+  stacktrace instead of being mislabelled as a ClickHouse error.
+- **Stale connection cache entries are cleaned up when the client process
+dies.** `Connection` now monitors the client pid and erases the cached struct
+  on `:DOWN`, so `get_conn/1` doesn't keep returning a dead pid.
+- **`Connection.stop/1` only erases the cache entry after the client process
+has been stopped** (or was already gone), so a failed stop leaves the cache
+  intact for retry, and always returns `:ok`.
+- **Empty `in` / `not_in` filter lists no longer produce invalid SQL.**
+  `col IN ()` would be rejected by ClickHouse; these now emit semantically
+  equivalent always-false / always-true literals.
+- **DISTINCT queries with sorts on unselected columns are now valid SQL.** Sort
+  columns missing from the SELECT list are appended automatically (ClickHouse
+  requires every ORDER BY expression in the SELECT list for DISTINCT).
+- **Migration version recording uses parameterized queries** instead of manual
+  string escaping (`record_applied/2`, `delete_applied/2`).
+- **Rollback stop comparison handles mixed-width numeric versions.** Versions
+  are compared numerically when both parse as integers, falling back to
+  lexicographic order for timestamp-style versions.
+- **Batched relationship-aggregate failures now raise by default**
+  (`QueryError`) instead of silently falling back to `default_value` — wrong
+  numbers in reports are usually worse than a loud error. Opt out with
+  `config :ash_clickhouse, :raise_on_aggregate_failure, false`.
+- **`avg` over Decimal columns keeps precision.** Aggregate decoding now uses
+  the field's attribute type for `avg` too, decoding back to `Decimal` instead
+  of losing precision as a float.
+- **Single-row update/destroy default to `mutations_sync: 1`**, giving
+  read-your-writes semantics so the returned record reflects the change
+  immediately.
+
+### Improvements
+
+- **`insert_rows/4` drops the unused `table` argument** (breaking change):
+  `repo.insert_rows(statement, rows, opts)` — the table was already embedded in
+  the statement. `Repo` behaviour and `DataLayer` call sites updated.
+- **Per-resource metadata caching.** `uuid_attribute_names/1`,
+  `atom_attribute_names/1`, and `attr_type_map/1` results are cached per
+  resource in an ETS table, so hot paths like per-row record decoding and bulk
+  value encoding don't re-scan resource attributes on every call.
 
 - **Standard Ash mix tasks.** `AshClickhouse.DataLayer.Extension` now implements
   `Spark.Dsl.Extension` with `codegen/1` and `migrate/1`, so `mix ash.codegen`

@@ -67,9 +67,7 @@ defmodule AshClickhouse.MigrationRunner do
   @doc "Records a migration version as applied."
   @spec record_applied(module(), String.t()) :: :ok | {:error, term()}
   def record_applied(repo, version) do
-    version = escape_string(to_string(version))
-
-    case repo.query("INSERT INTO #{@schema_migrations} (version) VALUES ('#{version}')", []) do
+    case repo.query("INSERT INTO #{@schema_migrations} (version) VALUES (?)", [to_string(version)]) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -78,12 +76,9 @@ defmodule AshClickhouse.MigrationRunner do
   @doc "Removes a migration version from the tracking table (rollback)."
   @spec delete_applied(module(), String.t()) :: :ok | {:error, term()}
   def delete_applied(repo, version) do
-    version = escape_string(to_string(version))
-
-    case repo.query(
-           "ALTER TABLE #{@schema_migrations} DELETE WHERE version = '#{version}'",
-           []
-         ) do
+    case repo.query("ALTER TABLE #{@schema_migrations} DELETE WHERE version = ?", [
+           to_string(version)
+         ]) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -387,7 +382,16 @@ defmodule AshClickhouse.MigrationRunner do
   defp rollback_stop?("0", _version), do: false
 
   defp rollback_stop?(target, version) when is_binary(target) or is_integer(target) do
-    to_string(version) <= to_string(target)
+    target = to_string(target)
+    version = to_string(version)
+
+    # Compare numerically when both sides parse as integers (handles
+    # mixed-width `version/0` values); fall back to lexicographic order for
+    # timestamp-style versions.
+    case {Integer.parse(target), Integer.parse(version)} do
+      {{t, ""}, {v, ""}} -> v <= t
+      _ -> version <= target
+    end
   end
 
   defp rollback_stop?(_other, _version), do: false
@@ -398,11 +402,5 @@ defmodule AshClickhouse.MigrationRunner do
     else
       Mix.shell().info(message)
     end
-  end
-
-  defp escape_string(string) do
-    string
-    |> String.replace("\\", "\\\\")
-    |> String.replace("'", "\\'")
   end
 end

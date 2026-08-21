@@ -374,7 +374,26 @@ defmodule AshClickhouse.AggregateTest do
       assert record.aggregates[:s] == 5
     end
 
-    test "same-table batch falls back to default_value when the query fails" do
+    test "same-table batch raises by default when the query fails" do
+      records = [struct(UserResource, id: "id-1", age: 30)]
+
+      agg = %{
+        kind: :sum,
+        name: :s,
+        field: :age,
+        relationship_path: [],
+        resource: UserResource,
+        default_value: 0
+      }
+
+      assert_raise AshClickhouse.Error.QueryError, ~r/db down/, fn ->
+        Aggregate.attach(records, [agg], UserResource, ErrRepo, [])
+      end
+    end
+
+    test "same-table batch falls back to default_value when raising is disabled" do
+      Application.put_env(:ash_clickhouse, :raise_on_aggregate_failure, false)
+
       records = [struct(UserResource, id: "id-1", age: 30)]
 
       agg = %{
@@ -388,9 +407,30 @@ defmodule AshClickhouse.AggregateTest do
 
       [record] = Aggregate.attach(records, [agg], UserResource, ErrRepo, [])
       assert record.aggregates[:s] == 0
+    after
+      Application.delete_env(:ash_clickhouse, :raise_on_aggregate_failure)
     end
 
-    test "belongs_to batch falls back to default_value when the query fails" do
+    test "belongs_to batch raises by default when the query fails" do
+      records = [struct(MemberResource, id: "m1", team_id: "t1")]
+
+      agg = %{
+        kind: :count,
+        name: :c,
+        field: nil,
+        relationship_path: [:team],
+        resource: MemberResource,
+        default_value: 0
+      }
+
+      assert_raise AshClickhouse.Error.QueryError, ~r/db down/, fn ->
+        Aggregate.attach(records, [agg], MemberResource, ErrRepo, [])
+      end
+    end
+
+    test "belongs_to batch falls back to default_value when raising is disabled" do
+      Application.put_env(:ash_clickhouse, :raise_on_aggregate_failure, false)
+
       records = [struct(MemberResource, id: "m1", team_id: "t1")]
 
       agg = %{
@@ -404,6 +444,8 @@ defmodule AshClickhouse.AggregateTest do
 
       [record] = Aggregate.attach(records, [agg], MemberResource, ErrRepo, [])
       assert record.aggregates[:c] == 0
+    after
+      Application.delete_env(:ash_clickhouse, :raise_on_aggregate_failure)
     end
   end
 end

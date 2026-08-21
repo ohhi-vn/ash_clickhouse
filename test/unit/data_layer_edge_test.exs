@@ -109,7 +109,7 @@ defmodule AshClickhouse.DataLayerEdgeTest do
       %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: []}
     end
 
-    def insert_rows(_table, _statement, rows, _opts) do
+    def insert_rows(_statement, rows, _opts) do
       record({:insert_rows, length(rows)})
 
       case Agent.get(__MODULE__, & &1.mode) do

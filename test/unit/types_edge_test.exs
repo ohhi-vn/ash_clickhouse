@@ -87,7 +87,9 @@ defmodule AshClickhouse.TypesEdgeTest do
       assert Types.encode_value(%{a: 1}, %{type: {:map, :string, :integer}}) == %{"a" => "1"}
       assert Types.encode_value([1, 2], %{type: Ash.Type.Array}) == ["1", "2"]
       assert Types.encode_value([1, 2], %{type: :list}) == ["1", "2"]
-      assert Types.encode_value([1, 2], %{type: {:array, :integer}}) == ["1", "2"]
+      # Typed arrays keep native element values so the client emits e.g.
+      # Array(Int64) rows as JSON numbers rather than strings.
+      assert Types.encode_value([1, 2], %{type: {:array, :integer}}) == [1, 2]
     end
 
     test "encodes module Time type and time_usec, leaving non-Time values alone" do

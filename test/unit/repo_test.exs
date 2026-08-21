@@ -10,8 +10,8 @@ defmodule AshClickhouse.RepoTest do
   end
 
   describe "generated repo functions" do
-    test "insert_rows/4 and ping/0 are exported" do
-      assert function_exported?(AshClickhouse.TestRepo, :insert_rows, 4)
+    test "insert_rows/3 and ping/0 are exported" do
+      assert function_exported?(AshClickhouse.TestRepo, :insert_rows, 3)
       assert function_exported?(AshClickhouse.TestRepo, :ping, 0)
       assert function_exported?(AshClickhouse.TestRepo, :query, 3)
       assert function_exported?(AshClickhouse.TestRepo, :query!, 3)

@@ -77,13 +77,13 @@ defmodule AshClickhouse.Repo do
       end
 
       @doc """
-      Inserts rows into a table. See `AshClickhouse.Connection.insert_rows/5`.
+      Inserts rows into a table. See `AshClickhouse.Connection.insert_rows/4`.
       """
       @impl AshClickhouse.Repo
-      @spec insert_rows(String.t(), String.t(), [list()], keyword()) ::
+      @spec insert_rows(String.t(), [list()], keyword()) ::
               {:ok, term()} | {:error, term()}
-      def insert_rows(table, statement, rows, opts \\ []) do
-        AshClickhouse.Connection.insert_rows(__MODULE__, table, statement, rows, opts)
+      def insert_rows(statement, rows, opts \\ []) do
+        AshClickhouse.Connection.insert_rows(__MODULE__, statement, rows, opts)
       end
 
       @doc """
@@ -158,7 +158,7 @@ defmodule AshClickhouse.Repo do
   @callback connection() :: AshClickhouse.Connection.t() | nil
   @callback create_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
   @callback drop_database(String.t() | nil) :: {:ok, term()} | {:error, term()}
-  @callback insert_rows(String.t(), String.t(), [list()], keyword()) ::
+  @callback insert_rows(String.t(), [list()], keyword()) ::
               {:ok, term()} | {:error, term()}
   @callback child_spec(keyword()) :: Supervisor.child_spec()
 

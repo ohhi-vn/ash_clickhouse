@@ -20,9 +20,7 @@ defmodule AshClickhouse.TestSupport.MigrationRepo do
     {:ok, result(rows)}
   end
 
-  def query("INSERT INTO schema_migrations (version) VALUES ('" <> rest, []) do
-    version = rest |> String.split("')") |> hd()
-
+  def query("INSERT INTO schema_migrations (version) VALUES (?)", [version]) do
     Agent.update(__MODULE__, fn state ->
       %{state | versions: MapSet.put(state.versions, version)}
     end)
@@ -30,9 +28,7 @@ defmodule AshClickhouse.TestSupport.MigrationRepo do
     {:ok, result([])}
   end
 
-  def query("ALTER TABLE schema_migrations DELETE WHERE version = '" <> rest, []) do
-    version = rest |> String.split("'") |> hd()
-
+  def query("ALTER TABLE schema_migrations DELETE WHERE version = ?", [version]) do
     Agent.update(__MODULE__, fn state ->
       %{state | versions: MapSet.delete(state.versions, version)}
     end)

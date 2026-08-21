@@ -162,6 +162,12 @@ defmodule AshClickhouse.Migration do
     end
   end
 
+  @doc false
+  # Test hook exposing the numeric-default validation without going through a
+  # full resource definition (Ash casts attribute defaults, so invalid values
+  # cannot reach this code via the DSL).
+  def inspect_default_for_test(value, type), do: inspect_numeric_default(value, type)
+
   # Numeric/other column types expect a bare literal (e.g. `42`, `1.5`). A
   # developer-authored default that is not a number would otherwise be passed
   # through `to_string/1` unescaped and could corrupt the generated DDL, so we

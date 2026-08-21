@@ -113,13 +113,14 @@ defmodule AshClickhouse.MigrationRunnerTest do
                {:error, "no insert"}
     end
 
-    test "record_applied/2 escapes quotes and backslashes in the version" do
+    test "record_applied/2 passes the version as a bound parameter (no string interpolation)" do
       raw = "2024'01\\01"
       MigrationRunner.record_applied(MigrationRepo, raw)
 
+      # With parameterized queries the raw version is stored verbatim — no
+      # escaping/mangling of quotes or backslashes.
       stored = MapSet.to_list(MigrationRepo.versions())
-      assert Enum.any?(stored, &(&1 != raw))
-      assert Enum.any?(stored, &String.contains?(&1, "\\"))
+      assert raw in stored
     end
 
     test "delete_applied/2 removes a version" do

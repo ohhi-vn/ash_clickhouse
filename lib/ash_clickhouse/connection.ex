@@ -59,6 +59,10 @@ defmodule AshClickhouse.Connection do
 
         if name do
           :persistent_term.put({__MODULE__, name}, conn)
+          # Clean up the cached struct if the client process crashes, so a
+          # stale entry doesn't keep serving a dead pid.
+          Process.monitor(pid)
+          :persistent_term.put({__MODULE__, name, :monitor_ref}, make_ref())
         end
 
         {:ok, pid}
@@ -105,6 +109,15 @@ defmodule AshClickhouse.Connection do
   The non-bang variant never raises: any exception raised by the client is
   converted to a normalized error tuple.
   """
+  # Client error modules from `AshClickhouse.Error`, duplicated here as a
+  # module attribute so `rescue` clauses can use the `e in [...]` form.
+  # `ArgumentError` is included because the `clickhouse` client raises it for
+  # operational failures like an unregistered/unknown client name.
+  @client_error_modules [
+    ArgumentError,
+    FunctionClauseError | AshClickhouse.Error.client_error_modules()
+  ]
+
   @spec query(t() | atom(), String.t(), list(), keyword()) ::
           {:ok, term()} | {:error, term()}
   def query(conn_or_name, sql, params \\ [], opts \\ []) do
@@ -112,7 +125,10 @@ defmodule AshClickhouse.Connection do
 
     ClickHouse.query(conn, sql, params, with_default_format(opts))
   rescue
-    e ->
+    # Only client errors are converted to a normalized error tuple. Any other
+    # exception (a genuine bug in the library or caller) propagates with its
+    # original stacktrace rather than being mislabelled as a ClickHouse error.
+    e in @client_error_modules ->
       Logger.debug("AshClickhouse.Connection.query failed: #{Exception.message(e)}")
       {:error, AshClickhouse.Error.wrap_clickhouse_error(e)}
   end
@@ -150,13 +166,13 @@ defmodule AshClickhouse.Connection do
   same column order as the statement. Options are forwarded to the underlying
   client (e.g. `async_insert`/`wait_for_async_insert`).
   """
-  @spec insert_rows(t() | atom(), String.t(), String.t(), [list()], keyword()) ::
+  @spec insert_rows(t() | atom(), String.t(), [list()], keyword()) ::
           {:ok, term()} | {:error, term()}
-  def insert_rows(conn_or_name, _table, statement, rows, opts \\ []) when is_list(rows) do
+  def insert_rows(conn_or_name, statement, rows, opts \\ []) when is_list(rows) do
     {conn, opts} = resolve_conn(conn_or_name, opts)
     ClickHouse.query(conn, statement, rows, with_default_format(opts))
   rescue
-    e ->
+    e in @client_error_modules ->
       Logger.debug("AshClickhouse.Connection.insert_rows failed: #{Exception.message(e)}")
       {:error, AshClickhouse.Error.wrap_clickhouse_error(e)}
   end
@@ -183,24 +199,28 @@ defmodule AshClickhouse.Connection do
 
   Terminates the underlying ClickHouse client process (registered under
   `name`) and removes the cached connection struct from `:persistent_term`.
+  The cache entry is only erased after the client process has been stopped (or
+  was already gone), so a failed stop leaves the cache intact for retry.
   Returns `:ok` if there was no connection to stop, or `{:error, reason}` if
   the client process could not be stopped.
   """
-  @spec stop(t() | atom()) :: :ok | {:error, term()}
+  @spec stop(t() | atom()) :: :ok
   def stop(name) when is_atom(name) do
     case get_conn(name) do
       nil ->
         :ok
 
       %__MODULE__{pid: pid, conn: conn} ->
-        :persistent_term.erase({__MODULE__, name})
         do_stop_client(pid || conn)
+        :persistent_term.erase({__MODULE__, name})
+        :ok
     end
   end
 
   def stop(%__MODULE__{conn: conn, name: name, pid: pid}) when not is_nil(name) do
-    :persistent_term.erase({__MODULE__, name})
     do_stop_client(pid || conn)
+    :persistent_term.erase({__MODULE__, name})
+    :ok
   end
 
   def stop(%__MODULE__{conn: conn, pid: pid}) do
@@ -210,11 +230,10 @@ defmodule AshClickhouse.Connection do
   def stop(_), do: :ok
 
   defp do_stop_client(conn) when is_pid(conn) do
-    case Supervisor.stop(conn) do
-      :ok -> :ok
-      {:error, :not_found} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    # `{:error, _}` can occur if the supervisor dies concurrently during
+    # shutdown; either way the client is gone, so treat it as stopped.
+    _ = Supervisor.stop(conn)
+    :ok
   rescue
     e ->
       Logger.debug("AshClickhouse.Connection.do_stop_client rescued on shutdown: #{inspect(e)}")
@@ -226,6 +245,26 @@ defmodule AshClickhouse.Connection do
   # name to a pid through the public API. Callers always pass the stored pid,
   # but if we somehow receive only an atom we treat it as already-stopped.
   defp do_stop_client(_), do: :ok
+
+  # When the client process dies (crash, supervisor restart, etc.), erase the
+  # cached struct so `get_conn/1` doesn't keep returning a dead pid. The
+  # monitor ref guards against handling :DOWN for a pid that was already
+  # replaced by a newer connection under the same name.
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, _state) do
+    for {key, %__MODULE__{pid: cached_pid}} <- :persistent_term.get(),
+        match?({__MODULE__, _name}, key),
+        cached_pid == pid do
+      {__MODULE__, name} = key
+      :persistent_term.erase(key)
+      :persistent_term.erase({__MODULE__, name, :monitor_ref})
+
+      Logger.warning(
+        "AshClickhouse connection #{inspect(name)} client #{inspect(pid)} died; cache entry removed"
+      )
+    end
+
+    :ok
+  end
 
   # --- internals -----------------------------------------------------------
 

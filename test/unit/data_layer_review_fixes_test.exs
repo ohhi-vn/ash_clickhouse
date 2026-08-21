@@ -82,7 +82,7 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
       %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: []}
     end
 
-    def insert_rows(_table, statement, rows, _opts) do
+    def insert_rows(statement, rows, _opts) do
       record({:insert_rows, statement, rows})
       {:ok, :ok}
     end

@@ -22,6 +22,7 @@ defmodule AshClickhouse.DataLayer.Insert do
   def build_insert_rows(rows, resource) do
     attrs = Info.attributes(resource)
     attr_map = Map.new(attrs, &{to_string(&1.name), &1})
+    uuid_fields = Types.uuid_attribute_names(resource)
 
     fields = Enum.map(attrs, &Identifier.quote_name(&1.name))
     field_atoms = Enum.map(attrs, & &1.name)
@@ -31,7 +32,7 @@ defmodule AshClickhouse.DataLayer.Insert do
         Enum.map(field_atoms, fn name ->
           case Map.fetch(row, to_string(name)) do
             {:ok, value} ->
-              encode_bulk_value(value, Map.fetch!(attr_map, to_string(name)), resource)
+              encode_bulk_value(value, Map.fetch!(attr_map, to_string(name)), uuid_fields)
 
             :error ->
               nil
@@ -225,28 +226,27 @@ defmodule AshClickhouse.DataLayer.Insert do
   #   * `DateTime` — integer number of seconds since the Unix epoch.
   #   * `Date` — integer number of days since 1970-01-01.
   #   * `Time` — the `"HH:MM:SS"` string (time columns are typed `String`).
-  defp encode_bulk_value(%DateTime{} = value, attr, _resource),
+  defp encode_bulk_value(%DateTime{} = value, attr, _uuid_fields),
     do: encode_datetime(value, attr)
 
-  defp encode_bulk_value(%NaiveDateTime{} = value, attr, _resource) do
+  defp encode_bulk_value(%NaiveDateTime{} = value, attr, _uuid_fields) do
     case DateTime.from_naive(value, "Etc/UTC") do
       {:ok, dt} -> encode_datetime(dt, attr)
       _ -> value
     end
   end
 
-  defp encode_bulk_value(%Date{} = value, _attr, _resource),
+  defp encode_bulk_value(%Date{} = value, _attr, _uuid_fields),
     do: Date.diff(value, ~D[1970-01-01])
 
-  defp encode_bulk_value(%Time{} = value, _attr, _resource),
+  defp encode_bulk_value(%Time{} = value, _attr, _uuid_fields),
     do: Time.to_string(value)
 
-  defp encode_bulk_value(%Decimal{} = value, _attr, _resource),
+  defp encode_bulk_value(%Decimal{} = value, _attr, _uuid_fields),
     do: Decimal.to_string(value, :normal)
 
-  defp encode_bulk_value(value, attr, resource) do
+  defp encode_bulk_value(value, attr, uuid_fields) do
     name = attr.name
-    uuid_fields = Types.uuid_attribute_names(resource)
 
     cond do
       name in uuid_fields and is_binary(value) and byte_size(value) == 16 ->

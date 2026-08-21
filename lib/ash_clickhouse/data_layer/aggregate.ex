@@ -44,10 +44,12 @@ defmodule AshClickhouse.DataLayer.Aggregate do
 
   def attach(records, aggregates, resource, repo, opts) do
     pkey = Info.primary_key(resource)
+    uuid_fields = Types.uuid_attribute_names(resource)
 
     aggregate_maps =
       Map.new(aggregates, fn aggregate ->
-        {aggregate.name, batched_values(aggregate, records, pkey, resource, repo, opts)}
+        {aggregate.name,
+         batched_values(aggregate, records, pkey, resource, repo, opts, uuid_fields)}
       end)
 
     Enum.map(records, fn record ->
@@ -94,7 +96,9 @@ defmodule AshClickhouse.DataLayer.Aggregate do
 
   defp decode_aggregate(value, kind, field, resource) when kind in [:sum, :min, :max, :avg] do
     case resolve_field_attr(field, resource) do
-      %{} = attr when kind != :avg ->
+      %{} = attr ->
+        # `avg` over a Decimal column would lose precision as a float; decode
+        # it back to Decimal using the field's attribute type.
         Types.decode_value(value, attr)
 
       _ ->
@@ -127,15 +131,15 @@ defmodule AshClickhouse.DataLayer.Aggregate do
   # Returns `%{pk_value_or_tuple => decoded_aggregate_value}` for every record's
   # owning key, computed with a single grouped query instead of N individual
   # ones.
-  defp batched_values(aggregate, records, pkey, resource, repo, opts) do
+  defp batched_values(aggregate, records, pkey, resource, repo, opts, uuid_fields) do
     %{kind: kind, field: field, relationship_path: path} = aggregate
 
     case path do
       [] ->
-        batched_same_table(kind, field, pkey, records, resource, repo, opts)
+        batched_same_table(kind, field, pkey, records, resource, repo, opts, uuid_fields)
 
       [rel_name] ->
-        batched_related(aggregate, rel_name, pkey, records, resource, repo, opts)
+        batched_related(aggregate, rel_name, pkey, records, resource, repo, opts, uuid_fields)
 
       _ ->
         # Multi-hop relationship aggregates are not supported; fall back to each
@@ -146,7 +150,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
 
   # Aggregating a field on the same row as the record itself — batch as a single
   # SELECT ... WHERE pk IN (...), keyed by pk.
-  defp batched_same_table(kind, field, pkey, records, resource, repo, opts) do
+  defp batched_same_table(kind, field, pkey, records, resource, repo, opts, uuid_fields) do
     if length(pkey) != 1 do
       %{}
     else
@@ -155,7 +159,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
       table = DataLayer.qualified_table(resource)
       cql_field = cql_field(kind, field, resource)
 
-      {in_clause, in_params} = build_in_clause(pk_col, pk_values, resource)
+      {in_clause, in_params} = build_in_clause(pk_col, pk_values, uuid_fields)
 
       query =
         "SELECT #{Identifier.quote_name(pk_col)}, #{cql_field} FROM #{table} WHERE #{in_clause}"
@@ -163,7 +167,8 @@ defmodule AshClickhouse.DataLayer.Aggregate do
       case repo.query(query, in_params, opts) do
         {:ok, %ClickHouse.Result{rows: rows}} ->
           Map.new(rows, fn [pk, value] ->
-            {normalize_key(pk, pk_col, resource), decode_aggregate(value, kind, field, resource)}
+            {normalize_key(pk, pk_col, uuid_fields),
+             decode_aggregate(value, kind, field, resource)}
           end)
 
         {:error, reason} ->
@@ -176,7 +181,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
   # Aggregating a field on a related table (has_many/has_one/belongs_to) — batch
   # as a single SELECT ... GROUP BY fk, keyed by the *source* record's join
   # column value.
-  defp batched_related(aggregate, rel_name, pkey, records, resource, repo, opts) do
+  defp batched_related(aggregate, rel_name, pkey, records, resource, repo, opts, uuid_fields) do
     %{kind: kind, field: field, default_value: default_value} = aggregate
     relationship = Info.relationship(resource, rel_name)
     related = Info.related(resource, [rel_name])
@@ -192,7 +197,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
 
           dest_pk ->
             cql_field = cql_field(kind, field, related)
-            {in_clause, in_params} = build_in_clause(dest_pk, fk_values, related)
+            {in_clause, in_params} = build_in_clause(dest_pk, fk_values, uuid_fields)
 
             query =
               "SELECT #{Identifier.quote_name(dest_pk)}, #{cql_field} FROM #{related_table} WHERE #{in_clause}"
@@ -205,7 +210,8 @@ defmodule AshClickhouse.DataLayer.Aggregate do
               key_col: dest_pk,
               default_value: default_value,
               pkey: pkey,
-              records: records
+              records: records,
+              uuid_fields: uuid_fields
             }
 
             handle_batched(repo, opts, query, in_params, context)
@@ -218,7 +224,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
           Enum.map(records, &Map.get(&1, relationship.source_attribute)) |> Enum.uniq()
 
         cql_field = cql_field(kind, field, related)
-        {in_clause, in_params} = build_in_clause(dest_fk, source_values, related)
+        {in_clause, in_params} = build_in_clause(dest_fk, source_values, uuid_fields)
 
         query =
           "SELECT #{Identifier.quote_name(dest_fk)}, #{cql_field} FROM #{related_table} " <>
@@ -232,7 +238,8 @@ defmodule AshClickhouse.DataLayer.Aggregate do
           key_col: dest_fk,
           default_value: default_value,
           pkey: pkey,
-          records: records
+          records: records,
+          uuid_fields: uuid_fields
         }
 
         handle_batched(repo, opts, query, in_params, context)
@@ -252,13 +259,14 @@ defmodule AshClickhouse.DataLayer.Aggregate do
          key_col: key_col,
          default_value: default_value,
          pkey: pkey,
-         records: records
+         records: records,
+         uuid_fields: uuid_fields
        }) do
     case repo.query(query, params, opts) do
       {:ok, %ClickHouse.Result{rows: rows}} ->
         source_map =
           Map.new(rows, fn [key_val, value] ->
-            {normalize_key(key_val, key_col, related),
+            {normalize_key(key_val, key_col, uuid_fields),
              decode_aggregate(value, kind, field, related)}
           end)
 
@@ -276,9 +284,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
   # Normalizes a key returned by ClickHouse (e.g. a UUID column comes back as a
   # 16-byte binary) to the form used by decoded Ash records (UUIDs are decoded
   # to their canonical 36-character string), so batched results merge correctly.
-  defp normalize_key(value, column, resource) do
-    uuid_fields = Types.uuid_attribute_names(resource)
-
+  defp normalize_key(value, column, uuid_fields) do
     if column in uuid_fields and is_binary(value) and byte_size(value) == 16 do
       case Types.uuid_binary_to_string(value) do
         {:ok, string} -> string
@@ -289,8 +295,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
     end
   end
 
-  defp build_in_clause(col, values, resource) do
-    uuid_fields = Types.uuid_attribute_names(resource)
+  defp build_in_clause(col, values, uuid_fields) do
     placeholders = Enum.map_join(values, ", ", fn _ -> "?" end)
     params = Enum.map(values, &Types.convert_uuid_param(&1, col, uuid_fields))
     {"#{Identifier.quote_name(col)} IN (#{placeholders})", params}
@@ -337,10 +342,24 @@ defmodule AshClickhouse.DataLayer.Aggregate do
     "#{kind}(#{inspect(field)})"
   end
 
+  # When `true`, a failed batched relationship-aggregate query raises instead of
+  # silently falling back to each aggregate's `default_value`. Wrong numbers in
+  # reports are usually worse than a loud error, so this defaults to `true`.
+  # Configure via `config :ash_clickhouse, :raise_on_aggregate_failure, false`.
+  @spec raise_on_aggregate_failure?() :: boolean()
+  defp raise_on_aggregate_failure? do
+    Application.get_env(:ash_clickhouse, :raise_on_aggregate_failure, true)
+  end
+
   defp warn_failed(aggregate, resource, reason) do
-    Logger.warning(
-      "Batched aggregate #{aggregate} failed for #{inspect(resource)}; falling back to " <>
-        "default_value: #{Exception.message(reason)}"
-    )
+    message =
+      "Batched aggregate #{aggregate} failed for #{inspect(resource)}: " <>
+        "#{Exception.message(reason)}"
+
+    if raise_on_aggregate_failure?() do
+      raise AshClickhouse.Error.QueryError, message
+    else
+      Logger.warning(message <> "; falling back to default_value")
+    end
   end
 end

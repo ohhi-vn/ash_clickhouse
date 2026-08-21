@@ -102,6 +102,8 @@ defmodule AshClickhouse.ConnectionTest do
 
   describe "query/4 with a pid connection" do
     test "resolves a pid connection and wraps the client failure" do
+      # A bare pid that is not a ClickHouse client is an invalid-argument
+      # client failure; the non-bang query wraps it as a ClickhouseError.
       assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
                Connection.query(self(), "SELECT 1", [])
     end
@@ -160,12 +162,11 @@ defmodule AshClickhouse.ConnectionTest do
     end
   end
 
-  describe "insert_rows/5" do
+  describe "insert_rows/4" do
     test "returns {:error, ClickhouseError} when the client is unreachable" do
       assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
                Connection.insert_rows(
                  :no_such_conn_insert,
-                 "tbl",
                  "INSERT INTO tbl (a) FORMAT JSONCompactEachRow",
                  [["x"]]
                )
@@ -177,7 +178,6 @@ defmodule AshClickhouse.ConnectionTest do
       assert {:error, %AshClickhouse.Error.ClickhouseError{}} =
                Connection.insert_rows(
                  conn,
-                 "tbl",
                  "INSERT INTO tbl (a) FORMAT JSONCompactEachRow",
                  [[1]]
                )

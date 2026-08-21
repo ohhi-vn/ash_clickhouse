@@ -134,13 +134,13 @@ defmodule AshClickhouse.ReleaseTest do
         def create_database, do: {:error, :nope}
         def database, do: "test_db"
 
-        def query("CREATE TABLE IF NOT EXISTS schema_migrations" <> _, []),
+        def query("CREATE TABLE IF NOT EXISTS schema_migrations" <> _, _params),
           do: {:ok, AshClickhouse.ReleaseTest.result()}
 
-        def query("SELECT version FROM schema_migrations", []),
+        def query("SELECT version FROM schema_migrations", _params),
           do: {:ok, AshClickhouse.ReleaseTest.result()}
 
-        def query(_statement, []), do: {:ok, AshClickhouse.ReleaseTest.result()}
+        def query(_statement, _params), do: {:ok, AshClickhouse.ReleaseTest.result()}
       end
 
       log =
@@ -156,13 +156,13 @@ defmodule AshClickhouse.ReleaseTest do
 
     test "skips database creation when the repo has no create_database/0" do
       defmodule NoCreateRepo do
-        def query("CREATE TABLE IF NOT EXISTS schema_migrations" <> _, []),
+        def query("CREATE TABLE IF NOT EXISTS schema_migrations" <> _, _params),
           do: {:ok, AshClickhouse.ReleaseTest.result()}
 
-        def query("SELECT version FROM schema_migrations", []),
+        def query("SELECT version FROM schema_migrations", _params),
           do: {:ok, AshClickhouse.ReleaseTest.result()}
 
-        def query(_statement, []), do: {:ok, AshClickhouse.ReleaseTest.result()}
+        def query(_statement, _params), do: {:ok, AshClickhouse.ReleaseTest.result()}
       end
 
       path =

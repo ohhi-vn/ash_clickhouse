@@ -77,7 +77,7 @@ defmodule AshClickhouse.DataLayerCrudTest do
       %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: [], columns: []}
     end
 
-    def insert_rows(_table, statement, rows, _opts) do
+    def insert_rows(statement, rows, _opts) do
       if Process.whereis(__MODULE__) do
         record_call(__MODULE__, {:insert_rows, statement, length(rows)})
       end
