@@ -20,9 +20,16 @@ defmodule AshClickhouse.TestSupport.MigrationRepo do
     {:ok, result(rows)}
   end
 
-  def query("INSERT INTO schema_migrations (version) VALUES (?)", [version]) do
+  def insert_rows(
+        "INSERT INTO schema_migrations (version) FORMAT JSONCompactEachRow",
+        rows,
+        opts \\ []
+      ) do
     Agent.update(__MODULE__, fn state ->
-      %{state | versions: MapSet.put(state.versions, version)}
+      versions =
+        Enum.reduce(rows, state.versions, fn [version], acc -> MapSet.put(acc, version) end)
+
+      %{state | versions: versions}
     end)
 
     {:ok, result([])}

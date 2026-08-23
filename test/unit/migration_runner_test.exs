@@ -106,14 +106,32 @@ defmodule AshClickhouse.MigrationRunnerTest do
 
     test "record_applied/2 returns the error when the insert fails" do
       defmodule InsertErrRepo do
-        def query("INSERT INTO schema_migrations" <> _, _params), do: {:error, "no insert"}
+        def insert_rows("INSERT INTO schema_migrations" <> _, _rows, _opts \\ []),
+          do: {:error, "no insert"}
       end
 
       assert MigrationRunner.record_applied(InsertErrRepo, "20240101000000") ==
                {:error, "no insert"}
     end
 
-    test "record_applied/2 passes the version as a bound parameter (no string interpolation)" do
+    test "record_applied/2 inserts the version as a single bulk row via insert_rows" do
+      defmodule InsertRowsSpyRepo do
+        def insert_rows(statement, rows, _opts \\ []) do
+          send(self(), {:insert_rows, statement, rows})
+          {:ok, AshClickhouse.MigrationRunnerTest.result()}
+        end
+      end
+
+      # Regression: the client treats INSERT params as bulk rows, so the
+      # version must be row-encoded ([[version]]) — never a scalar param.
+      assert MigrationRunner.record_applied(InsertRowsSpyRepo, "20260811063727") == :ok
+
+      assert_received {:insert_rows,
+                       "INSERT INTO schema_migrations (version) FORMAT JSONCompactEachRow",
+                       [["20260811063727"]]}
+    end
+
+    test "record_applied/2 encodes the version without string interpolation" do
       raw = "2024'01\\01"
       MigrationRunner.record_applied(MigrationRepo, raw)
 
@@ -567,6 +585,47 @@ defmodule AshClickhouse.MigrationRunnerTest do
                MigrationRunner.rollback(DownFailRepo, :all, migration_path: path, logger: true)
 
       assert reason =~ "down boom"
+    end
+  end
+
+  # Regression: sibling extensions (e.g. AshScylla) require every `.exs` under
+  # priv/repo/migrations before AshClickhouse discovers them, so
+  # `Code.require_file/1` yields nothing for those files and discovery used to
+  # silently return zero modules ("No pending migrations" with an empty
+  # tracking table).
+  describe "files already required in the VM" do
+    test "discover_migrations/1 resolves modules for already-required files" do
+      module = unique_module_name()
+
+      path =
+        temp_migration_path([
+          {"20260811063727_pre_required.exs",
+           migration_file(module, "20260811063727", ["SELECT 1"])}
+        ])
+
+      file = Path.join(path, "20260811063727_pre_required.exs")
+
+      assert [{required, _}] = Code.require_file(file)
+
+      assert [%{version: "20260811063727", module: ^required}] =
+               MigrationRunner.discover_migrations(path)
+    end
+
+    test "migrate/2 still applies and records already-required migrations" do
+      path =
+        temp_migration_path([
+          {"20240101000000_create_users.exs",
+           migration_file(unique_module_name(), "20240101000000", [
+             "CREATE TABLE IF NOT EXISTS `users` (`id` UUID)"
+           ])}
+        ])
+
+      Code.require_file(Path.join(path, "20240101000000_create_users.exs"))
+
+      assert {:ok, %{applied: [_module], skipped: []}} =
+               MigrationRunner.migrate(MigrationRepo, migration_path: path, logger: true)
+
+      assert MigrationRepo.versions() == MapSet.new(["20240101000000"])
     end
   end
 end

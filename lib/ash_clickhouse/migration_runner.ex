@@ -67,7 +67,12 @@ defmodule AshClickhouse.MigrationRunner do
   @doc "Records a migration version as applied."
   @spec record_applied(module(), String.t()) :: :ok | {:error, term()}
   def record_applied(repo, version) do
-    case repo.query("INSERT INTO #{@schema_migrations} (version) VALUES (?)", [to_string(version)]) do
+    # The `clickhouse` client treats params of an INSERT statement as bulk
+    # rows (`?` placeholders are never substituted there), so the version is
+    # inserted through the same row-encoding path as data-layer inserts.
+    statement = "INSERT INTO #{@schema_migrations} (version) FORMAT JSONCompactEachRow"
+
+    case repo.insert_rows(statement, [[to_string(version)]]) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
@@ -233,14 +238,39 @@ defmodule AshClickhouse.MigrationRunner do
         %{version: migration_version(module, file), module: module}
 
       [] ->
-        case Code.require_file(file) do
-          [{module, _} | _] ->
+        case require_migration(file) do
+          {:ok, module} ->
             :ets.insert(loaded_migrations_table(), {file, module})
             %{version: migration_version(module, file), module: module}
 
-          _ ->
+          :error ->
             %{version: nil, module: nil}
         end
+    end
+  end
+
+  # `Code.require_file/1` yields no module for files that were already
+  # required elsewhere in this VM — sibling extensions (e.g. AshScylla) scan
+  # the same migrations directory during `mix ash.migrate` — so fall back to
+  # resolving the already-loaded module from the file's source.
+  defp require_migration(file) do
+    case Code.require_file(file) do
+      [{module, _} | _] ->
+        {:ok, module}
+
+      _ ->
+        module_from_source(file)
+    end
+  end
+
+  defp module_from_source(file) do
+    with {:ok, source} <- File.read(file),
+         [_, name] <- Regex.run(~r/defmodule\s+([\w.]+)\s+do/, source),
+         module = Module.concat(String.split(name, ".")),
+         {:module, ^module} <- Code.ensure_loaded(module) do
+      {:ok, module}
+    else
+      _ -> :error
     end
   end
 

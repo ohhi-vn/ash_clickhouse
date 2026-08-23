@@ -163,6 +163,9 @@ defmodule AshClickhouse.ReleaseTest do
           do: {:ok, AshClickhouse.ReleaseTest.result()}
 
         def query(_statement, _params), do: {:ok, AshClickhouse.ReleaseTest.result()}
+
+        def insert_rows(_statement, _rows, _opts \\ []),
+          do: {:ok, AshClickhouse.ReleaseTest.result()}
       end
 
       path =

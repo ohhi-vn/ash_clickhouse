@@ -507,7 +507,7 @@ defmodule AshClickhouse.CoverageGapsTest do
     def query("SELECT version FROM schema_migrations", []),
       do: {:ok, AshClickhouse.CoverageGapsTest.result()}
 
-    def query("INSERT INTO schema_migrations (version) VALUES (?)", _), do: {:error, :boom}
+    def insert_rows("INSERT INTO schema_migrations" <> _, _rows, _opts \\ []), do: {:error, :boom}
     def query("ALTER TABLE schema_migrations DELETE WHERE version = ?", _), do: {:error, :boom}
     def query(_statement, []), do: {:ok, AshClickhouse.CoverageGapsTest.result()}
   end

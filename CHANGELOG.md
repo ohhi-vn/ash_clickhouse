@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.1
+
+### Bug fixes
+
+- **Recording applied migrations no longer fails.** `record_applied/2` passed
+  the version as a scalar param to `INSERT INTO schema_migrations ... VALUES (?)`,
+  but the client treats params of any `INSERT` as bulk rows (each must be a
+  list, and `?` placeholders are never substituted there) — so applying any
+  migration crashed with a `FunctionClauseError` (surfacing as a
+  `ClickhouseError`) even though the DDL itself had succeeded. The version is
+  now written through the same row-encoding path as data-layer inserts:
+  `repo.insert_rows(statement, [[version]])` with `FORMAT JSONCompactEachRow`.
+- **Migration discovery finds files another extension already loaded.** During
+  `mix ash.migrate`, sibling extensions require every `.exs` under
+  `priv/repo/migrations`, and `Code.require_file/1` returns nothing for files
+  already required in the VM — so AshClickhouse discovered zero modules and
+  reported "No pending migrations" against an empty tracking table. Discovery
+  now falls back to resolving the already-loaded module from the file's
+  `defmodule` name via `Code.ensure_loaded`.
+
 ## 0.7.0
 
 ### Features
@@ -37,9 +57,9 @@ has been stopped** (or was already gone), so a failed stop leaves the cache
 - **DISTINCT queries with sorts on unselected columns are now valid SQL.** Sort
   columns missing from the SELECT list are appended automatically (ClickHouse
   requires every ORDER BY expression in the SELECT list for DISTINCT).
-- **Migration version recording uses parameterized queries** instead of manual
-  string escaping (`record_applied/2`, `delete_applied/2`).
-- **Rollback stop comparison handles mixed-width numeric versions.** Versions
+- **Rollback version deletion uses parameterized queries** instead of manual
+  string escaping (`delete_applied/2`).
+- **`Rollback stop comparison handles mixed-width numeric versions.** Versions
   are compared numerically when both parse as integers, falling back to
   lexicographic order for timestamp-style versions.
 - **Batched relationship-aggregate failures now raise by default**
