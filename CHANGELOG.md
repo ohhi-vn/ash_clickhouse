@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2
+
+### Bug fixes
+
+- **Resource metadata caching no longer fails when the ETS table is missing.**
+  The `:ash_clickhouse_resource_metadata` table is now initialized at
+  application startup and owned by the long-lived application process, so it
+  is not removed when the request process that first reads resource metadata
+  exits.
+
 ## 0.7.1
 
 ### Bug fixes

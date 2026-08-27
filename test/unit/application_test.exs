@@ -31,22 +31,44 @@ defmodule AshClickhouse.ApplicationTest do
     :ok
   end
 
-  test "start/2 creates the repo cache ETS table and a supervisor" do
+  test "start/2 creates the shared cache ETS tables and a supervisor" do
     assert {:ok, pid} = @app_module.start(:normal, [])
 
     assert :ets.whereis(:ash_clickhouse_repo_cache) != :undefined
+    assert :ets.whereis(:ash_clickhouse_resource_metadata) != :undefined
     assert Process.whereis(AshClickhouse.Supervisor) != nil
 
-    Application.stop(:ash_clickhouse)
+    Supervisor.stop(pid)
   end
 
   test "start/2 tolerates an existing table and an already-started supervisor" do
     assert {:ok, pid} = @app_module.start(:normal, [])
 
-    # The table now exists; the second start must take the `_ -> :ok` branch
-    # and tolerate the named supervisor already being up.
+    # The tables now exist; the second start must tolerate existing tables and
+    # the already-started supervisor.
     assert {:error, {:already_started, ^pid}} = @app_module.start(:normal, [])
 
-    Application.stop(:ash_clickhouse)
+    Supervisor.stop(pid)
+  end
+
+  test "metadata cache survives the process that first reads resource metadata" do
+    {:ok, _} = Application.ensure_all_started(:ash_clickhouse)
+    owner = :ets.info(:ash_clickhouse_resource_metadata, :owner)
+    ref = make_ref()
+    parent = self()
+
+    requester =
+      spawn(fn ->
+        AshClickhouse.DataLayer.Types.uuid_attribute_names(AshClickhouse.TestResource)
+        send(parent, {:metadata_read, ref})
+      end)
+
+    monitor_ref = Process.monitor(requester)
+    assert_receive {:metadata_read, ^ref}
+    assert_receive {:DOWN, ^monitor_ref, :process, ^requester, :normal}
+
+    assert :ets.whereis(:ash_clickhouse_resource_metadata) != :undefined
+    assert :ets.info(:ash_clickhouse_resource_metadata, :owner) == owner
+    assert Process.alive?(owner)
   end
 end

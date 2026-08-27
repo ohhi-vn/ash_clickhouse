@@ -3,23 +3,30 @@ defmodule AshClickhouse.Application do
 
   use Application
 
+  @repo_cache :ash_clickhouse_repo_cache
+  @metadata_cache :ash_clickhouse_resource_metadata
+
   @impl Application
   def start(_type, _args) do
-    # Create the repo-resolution cache once at boot so concurrent first-time
-    # lookups can't race on `:ets.new` (which would otherwise crash one caller
-    # with `ArgumentError: table already exists`). Guarded so a repeated start
-    # (e.g. during code reload) does not crash.
-    case :ets.whereis(:ash_clickhouse_repo_cache) do
-      :undefined ->
-        :ets.new(:ash_clickhouse_repo_cache, [:named_table, :public, {:read_concurrency, true}])
-
-      _ ->
-        :ok
-    end
+    # Create shared caches at boot. Their owner must be a long-lived
+    # application process rather than an arbitrary request process, otherwise
+    # ETS deletes the tables when the first request exits.
+    ensure_cache(@repo_cache)
+    ensure_cache(@metadata_cache)
 
     children = []
 
     opts = [strategy: :one_for_one, name: AshClickhouse.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp ensure_cache(table) do
+    case :ets.whereis(table) do
+      :undefined ->
+        :ets.new(table, [:named_table, :public, {:read_concurrency, true}])
+
+      _ ->
+        :ok
+    end
   end
 end
