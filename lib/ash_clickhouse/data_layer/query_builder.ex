@@ -301,10 +301,6 @@ defmodule AshClickhouse.DataLayer.QueryBuilder do
   defp ref_name(%Ash.Query.Ref{attribute: %{name: name}}), do: name
   defp ref_name(%Ash.Query.Ref{attribute: name}) when is_atom(name), do: name
   defp ref_name(%Ash.Query.Ref{attribute: name}) when is_binary(name), do: name
-  # Fallbacks for callers that pass a bare atom/binary instead of a Ref.
-  @dialyzer {:nowarn_function, ref_name: 1}
-  defp ref_name(name) when is_atom(name), do: name
-  defp ref_name(name) when is_binary(name), do: name
 
   # When `true`, `contains` uses a case-sensitive substring search
   # (`position()`), matching the case-sensitivity of `starts_with`/`ends_with`.

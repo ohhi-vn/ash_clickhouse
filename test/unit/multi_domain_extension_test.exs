@@ -35,16 +35,6 @@ defmodule AshClickhouse.MultiDomainExtensionTest do
 
   # ── Domain A ────────────────────────────────────────────────────────────────
 
-  defmodule DomainA do
-    @moduledoc "First test domain, backed by RepoA."
-    use Ash.Domain
-
-    resources do
-      resource(AshClickhouse.MultiDomainExtensionTest.OrderA)
-      resource(AshClickhouse.MultiDomainExtensionTest.ArchivedA)
-    end
-  end
-
   defmodule OrderA do
     use Ash.Resource,
       data_layer: AshClickhouse.DataLayer,
@@ -84,14 +74,21 @@ defmodule AshClickhouse.MultiDomainExtensionTest do
     end
   end
 
-  # ── Domain B ────────────────────────────────────────────────────────────────
-
-  defmodule DomainB do
-    @moduledoc "Second test domain, backed by RepoB."
-    use Ash.Domain
+  # Domains are defined after their resources so that, when Spark's
+  # `__verify_spark_dsl__` hook runs for the domain, every referenced resource
+  # module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
+  # module while the rest of the file is still compiling). `allow_unregistered?`
+  # lets tests define extra resources (e.g. `OnlyArchivedA`) at runtime and use
+  # them with this domain without recompiling it.
+  defmodule DomainA do
+    @moduledoc "First test domain, backed by RepoA."
+    use Ash.Domain, validate_config_inclusion?: false
 
     resources do
-      resource(AshClickhouse.MultiDomainExtensionTest.ProductB)
+      allow_unregistered?(true)
+
+      resource(AshClickhouse.MultiDomainExtensionTest.OrderA)
+      resource(AshClickhouse.MultiDomainExtensionTest.ArchivedA)
     end
   end
 
@@ -113,19 +110,18 @@ defmodule AshClickhouse.MultiDomainExtensionTest do
     end
   end
 
+  defmodule DomainB do
+    @moduledoc "Second test domain, backed by RepoB."
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      resource(AshClickhouse.MultiDomainExtensionTest.ProductB)
+    end
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────────────
 
   defp all_resources, do: [OrderA, ArchivedA, ProductB]
-
-  defp capture_all(fun) do
-    out =
-      capture_io(fn ->
-        err = capture_io(:stderr, fun)
-        Process.put(:captured_err, err)
-      end)
-
-    out <> Process.get(:captured_err, "")
-  end
 
   # ── Tests ───────────────────────────────────────────────────────────────────
 

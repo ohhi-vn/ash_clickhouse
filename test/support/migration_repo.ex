@@ -15,15 +15,10 @@ defmodule AshClickhouse.TestSupport.MigrationRepo do
 
   def database, do: "test_db"
 
-  def query("SELECT version FROM schema_migrations", []) do
-    rows = versions() |> Enum.sort() |> Enum.map(&[&1])
-    {:ok, result(rows)}
-  end
-
   def insert_rows(
         "INSERT INTO schema_migrations (version) FORMAT JSONCompactEachRow",
         rows,
-        opts \\ []
+        _opts \\ []
       ) do
     Agent.update(__MODULE__, fn state ->
       versions =
@@ -33,6 +28,11 @@ defmodule AshClickhouse.TestSupport.MigrationRepo do
     end)
 
     {:ok, result([])}
+  end
+
+  def query("SELECT version FROM schema_migrations", []) do
+    rows = versions() |> Enum.sort() |> Enum.map(&[&1])
+    {:ok, result(rows)}
   end
 
   def query("ALTER TABLE schema_migrations DELETE WHERE version = ?", [version]) do

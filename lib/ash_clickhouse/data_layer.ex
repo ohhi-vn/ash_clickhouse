@@ -814,7 +814,6 @@ defmodule AshClickhouse.DataLayer do
   end
 
   defp build_where_clause(nil, _resource), do: {"", []}
-  defp build_where_clause([], _resource), do: {"", []}
 
   # ============================================================================
   # Record decoding

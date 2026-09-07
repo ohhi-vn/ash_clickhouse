@@ -7,8 +7,6 @@ defmodule AshClickhouse.Telemetry do
   Ash data layers.
   """
 
-  require Logger
-
   @doc """
   Spans a query execution, emitting telemetry start/stop/exception events.
 

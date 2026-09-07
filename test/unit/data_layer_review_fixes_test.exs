@@ -11,10 +11,7 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
   """
   use ExUnit.Case, async: false
 
-  import Ash.Query
-
   alias AshClickhouse.DataLayer
-  alias AshClickhouse.Query
 
   # ── Fake repo ────────────────────────────────────────────────────────────────
 
@@ -96,17 +93,7 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
     end
   end
 
-  # ── Fake domain ──────────────────────────────────────────────────────────────
-
-  defmodule FakeDomain do
-    @moduledoc false
-    use Ash.Domain
-
-    resources do
-      resource(CustomerResource)
-      resource(OrderResource)
-    end
-  end
+  # ── Fake resources ──────────────────────────────────────────────────────────
 
   defmodule OrderResource do
     use Ash.Resource,
@@ -127,7 +114,12 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
     end
 
     relationships do
-      belongs_to(:customer, CustomerResource)
+      # Bare aliases must not be used inside nested defmodules: Spark stores
+      # them unexpanded (`Elixir.CustomerResource`), so Ash's verifiers see a
+      # nonexistent top-level module. Always use the fully-qualified name.
+      belongs_to(:customer, AshClickhouse.DataLayerReviewFixesTest.CustomerResource,
+        validate_destination_attribute?: false
+      )
     end
 
     actions do
@@ -160,7 +152,14 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
     end
 
     relationships do
-      has_many(:orders, OrderResource)
+      # The destination FK column is `customer_id` (see OrderResource);
+      # without this, Ash derives `customer_resource_id` from the source name.
+      # The destination module is fully qualified (see the note in
+      # OrderResource.relationships).
+      has_many(:orders, AshClickhouse.DataLayerReviewFixesTest.OrderResource,
+        destination_attribute: :customer_id,
+        validate_destination_attribute?: false
+      )
     end
 
     actions do
@@ -169,6 +168,20 @@ defmodule AshClickhouse.DataLayerReviewFixesTest do
       create :create do
         accept([:order_number, :name])
       end
+    end
+  end
+
+  # The domain is defined after its resources so that, when Spark's
+  # `__verify_spark_dsl__` hook runs for the domain, every referenced resource
+  # module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
+  # module while the rest of the file is still compiling).
+  defmodule FakeDomain do
+    @moduledoc false
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      resource(AshClickhouse.DataLayerReviewFixesTest.CustomerResource)
+      resource(AshClickhouse.DataLayerReviewFixesTest.OrderResource)
     end
   end
 

@@ -116,3 +116,18 @@ defmodule AshClickhouse.TestBulkResource do
     end
   end
 end
+
+# The domain is defined after its resources so that, when Spark's
+# `__verify_spark_dsl__` hook runs for the domain, every referenced resource
+# module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
+# module while the rest of the file is still compiling).
+defmodule AshClickhouse.TestDomain do
+  @moduledoc "Test Ash domain for integration tests."
+  use Ash.Domain
+
+  resources do
+    resource(AshClickhouse.TestResource)
+    resource(AshClickhouse.TestPartitionedResource)
+    resource(AshClickhouse.TestBulkResource)
+  end
+end

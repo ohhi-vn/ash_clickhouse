@@ -331,7 +331,7 @@ defmodule AshClickhouse.ReleaseTest do
     end
 
     test "returns an error, not a crash, when the tracking table cannot be created" do
-      defmodule BareErrorRepo do
+      defmodule BareRollbackErrorRepo do
         def create_database, do: {:ok, :created}
         def database, do: "test_db"
 
@@ -340,7 +340,7 @@ defmodule AshClickhouse.ReleaseTest do
       end
 
       assert {:error, message} =
-               Release.rollback(BareErrorRepo, :all, [BareErrorRepo],
+               Release.rollback(BareRollbackErrorRepo, :all, [BareRollbackErrorRepo],
                  migration_path: "/nonexistent"
                )
 

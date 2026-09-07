@@ -11,22 +11,6 @@ defmodule AshClickhouse.DataLayerCrudTest do
   alias AshClickhouse.DataLayer
   alias AshClickhouse.Query
 
-  # ── Fake domain ───────────────────────────────────────────────────────────
-
-  defmodule FakeDomain do
-    @moduledoc """
-    Domain hosting the fake resources so Ash can resolve changesets/queries.
-    """
-    use Ash.Domain
-
-    resources do
-      resource(FakeResource)
-      resource(TenantResource)
-      resource(ContextTenantResource)
-      resource(TransformResource)
-    end
-  end
-
   # ── Fake repo ───────────────────────────────────────────────────────────────
 
   defmodule FakeRepo do
@@ -210,6 +194,24 @@ defmodule AshClickhouse.DataLayerCrudTest do
 
     actions do
       defaults([:read])
+    end
+  end
+
+  # The domain is defined after its resources so that, when Spark's
+  # `__verify_spark_dsl__` hook runs for the domain, every referenced resource
+  # module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
+  # module while the rest of the file is still compiling).
+  defmodule FakeDomain do
+    @moduledoc """
+    Domain hosting the fake resources so Ash can resolve changesets/queries.
+    """
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      resource(AshClickhouse.DataLayerCrudTest.FakeResource)
+      resource(AshClickhouse.DataLayerCrudTest.TenantResource)
+      resource(AshClickhouse.DataLayerCrudTest.ContextTenantResource)
+      resource(AshClickhouse.DataLayerCrudTest.TransformResource)
     end
   end
 

@@ -5,19 +5,6 @@ defmodule AshClickhouse.AggregateTest do
   alias AshClickhouse.DataLayer.Aggregate
   alias AshClickhouse.DataLayer.Types
 
-  defmodule FakeDomain do
-    use Ash.Domain
-
-    resources do
-      resource(UserResource)
-      resource(TeamResource)
-      resource(MemberResource)
-      resource(CompositeResource)
-      resource(CompositeTeamResource)
-      resource(CompositeMemberResource)
-    end
-  end
-
   defmodule UserResource do
     use Ash.Resource,
       data_layer: AshClickhouse.DataLayer,
@@ -72,7 +59,13 @@ defmodule AshClickhouse.AggregateTest do
     end
 
     relationships do
-      belongs_to(:team, TeamResource)
+      # `team_id` is intentionally a plain string here (fake repo, canned
+      # results), so skip the destination-attribute type check. The destination
+      # module is fully qualified because bare aliases inside nested defmodules
+      # are stored unexpanded by Spark (see data_layer_review_fixes_test).
+      belongs_to(:team, AshClickhouse.AggregateTest.TeamResource,
+        validate_destination_attribute?: false
+      )
     end
   end
 
@@ -130,7 +123,28 @@ defmodule AshClickhouse.AggregateTest do
     end
 
     relationships do
-      belongs_to(:team, CompositeTeamResource)
+      # See the note on MemberResource.team: `team_id` is intentionally a
+      # plain string, and the destination module must be fully qualified.
+      belongs_to(:team, AshClickhouse.AggregateTest.CompositeTeamResource,
+        validate_destination_attribute?: false
+      )
+    end
+  end
+
+  # The domain is defined after its resources so that, when Spark's
+  # `__verify_spark_dsl__` hook runs for the domain, every referenced resource
+  # module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
+  # module while the rest of the file is still compiling).
+  defmodule FakeDomain do
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      resource(AshClickhouse.AggregateTest.UserResource)
+      resource(AshClickhouse.AggregateTest.TeamResource)
+      resource(AshClickhouse.AggregateTest.MemberResource)
+      resource(AshClickhouse.AggregateTest.CompositeResource)
+      resource(AshClickhouse.AggregateTest.CompositeTeamResource)
+      resource(AshClickhouse.AggregateTest.CompositeMemberResource)
     end
   end
 

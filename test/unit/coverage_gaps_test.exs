@@ -118,7 +118,10 @@ defmodule AshClickhouse.CoverageGapsTest do
       {:ok, pid} = Connection.start_link(name: name, url: "http://127.0.0.1:1")
 
       assert_raise Error.ClickhouseError, fn ->
-        Connection.query!(%Connection{conn: name, pid: pid, name: name, database: nil}, "SELECT 1")
+        Connection.query!(
+          %Connection{conn: name, pid: pid, name: name, database: nil},
+          "SELECT 1"
+        )
       end
 
       Connection.stop(name)
@@ -208,16 +211,19 @@ defmodule AshClickhouse.CoverageGapsTest do
 
       attributes do
         uuid_primary_key(:id)
+
         attribute(:count, :decimal,
           allow_nil?: false,
           constraints: [precision: 38, scale: 10],
           default: Decimal.new("2024.0102")
         )
+
         attribute(:ratio, :decimal,
           allow_nil?: false,
           constraints: [precision: 38, scale: 10],
           default: Decimal.new("1.5")
         )
+
         attribute(:numeric_string, :integer, allow_nil?: false, default: "42")
         attribute(:flag, :boolean, allow_nil?: false, default: true)
       end
@@ -234,14 +240,15 @@ defmodule AshClickhouse.CoverageGapsTest do
     test "Date and DateTime defaults on a Decimal column are quoted ISO8601 literals" do
       # Ash casts attribute defaults, so Date/DateTime values on a :decimal
       # attribute cannot be declared via the DSL. Exercise the code path through
-      # the test hook instead.
-      attr = %{
-        name: :day,
-        type: Ash.Type.Decimal,
-        constraints: [precision: 38, scale: 10],
-        allow_nil?: false,
-        default: ~D[2024-01-02]
-      }
+      # the test hook instead. A resource attribute here would look like:
+      #
+      #   %{
+      #     name: :day,
+      #     type: Ash.Type.Decimal,
+      #     constraints: [precision: 38, scale: 10],
+      #     allow_nil?: false,
+      #     default: ~D[2024-01-02]
+      #   }
 
       assert Migration.inspect_default_for_test(~D[2024-01-02], "Decimal(38, 10)") ==
                "'2024-01-02'"
@@ -332,11 +339,13 @@ defmodule AshClickhouse.CoverageGapsTest do
     @attr %{type: :utc_datetime}
 
     test "parses a space-separated timestamp into a DateTime" do
-      assert %DateTime{year: 2024, month: 1, day: 2} = Types.decode_value("2024-01-02 03:04:05", @attr)
+      assert %DateTime{year: 2024, month: 1, day: 2} =
+               Types.decode_value("2024-01-02 03:04:05", @attr)
     end
 
     test "keeps values that already carry a zone offset" do
-      assert %DateTime{year: 2024, month: 1, day: 2} = Types.decode_value("2024-01-02T03:04:05Z", @attr)
+      assert %DateTime{year: 2024, month: 1, day: 2} =
+               Types.decode_value("2024-01-02T03:04:05Z", @attr)
     end
 
     test "passes through unparseable binaries, nil, structs and other terms" do
@@ -501,13 +510,14 @@ defmodule AshClickhouse.CoverageGapsTest do
   # ── MigrationRunner ─────────────────────────────────────────────────────────
 
   defmodule RunnerFailRepo do
+    def insert_rows("INSERT INTO schema_migrations" <> _, _rows, _opts \\ []), do: {:error, :boom}
+
     def query("CREATE TABLE IF NOT EXISTS schema_migrations" <> _, []),
       do: {:ok, AshClickhouse.CoverageGapsTest.result()}
 
     def query("SELECT version FROM schema_migrations", []),
       do: {:ok, AshClickhouse.CoverageGapsTest.result()}
 
-    def insert_rows("INSERT INTO schema_migrations" <> _, _rows, _opts \\ []), do: {:error, :boom}
     def query("ALTER TABLE schema_migrations DELETE WHERE version = ?", _), do: {:error, :boom}
     def query(_statement, []), do: {:ok, AshClickhouse.CoverageGapsTest.result()}
   end
@@ -633,7 +643,7 @@ defmodule AshClickhouse.CoverageGapsTest do
 
       def database, do: "test_db"
 
-      defp result(rows \\ []),
+      defp result(rows),
         do: %ClickHouse.Result{raw: "", meta: %{}, compressed: false, rows: rows, columns: []}
     end
 
@@ -858,14 +868,22 @@ defmodule AshClickhouse.CoverageGapsTest do
       uuid_fields = MapSet.new()
 
       # Non-struct fallback clause (`_ -> value`).
-      assert AshClickhouse.DataLayer.Insert.encode_attr_value(:other, :weird_term, %{}, uuid_fields) ==
+      assert AshClickhouse.DataLayer.Insert.encode_attr_value(
+               :other,
+               :weird_term,
+               %{},
+               uuid_fields
+             ) ==
                :weird_term
 
       # `DateTime` on a plain `DateTime` column encodes as epoch seconds.
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       assert elem(
-               AshClickhouse.DataLayer.Insert.build_insert_rows([%{"at" => dt}], DateTimeResource),
+               AshClickhouse.DataLayer.Insert.build_insert_rows(
+                 [%{"at" => dt}],
+                 DateTimeResource
+               ),
                1
              ) == [[nil, 1_704_164_645_000_000]]
     end
@@ -874,7 +892,8 @@ defmodule AshClickhouse.CoverageGapsTest do
       {:ok, naive} = NaiveDateTime.from_iso8601("2024-01-02T03:04:05")
 
       assert elem(
-               AshClickhouse.DataLayer.Insert.build_insert_rows([%{"at" => naive}],
+               AshClickhouse.DataLayer.Insert.build_insert_rows(
+                 [%{"at" => naive}],
                  DateTimeResource
                ),
                1
@@ -885,7 +904,8 @@ defmodule AshClickhouse.CoverageGapsTest do
       {:ok, uuid_bin} = Types.uuid_string_to_binary(uuid)
 
       assert elem(
-               AshClickhouse.DataLayer.Insert.build_insert_rows([%{"id" => uuid_bin}],
+               AshClickhouse.DataLayer.Insert.build_insert_rows(
+                 [%{"id" => uuid_bin}],
                  DateTimeResource
                ),
                1
@@ -895,7 +915,8 @@ defmodule AshClickhouse.CoverageGapsTest do
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       assert elem(
-               AshClickhouse.DataLayer.Insert.build_insert_rows([%{"at" => dt}],
+               AshClickhouse.DataLayer.Insert.build_insert_rows(
+                 [%{"at" => dt}],
                  SecondPrecisionDateTimeResource
                ),
                1

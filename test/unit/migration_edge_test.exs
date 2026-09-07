@@ -78,6 +78,12 @@ defmodule AshClickhouse.MigrationEdgeTest do
 
     import AshClickhouse.DataLayer.Dsl.Macros
 
+    # Intentionally keyless: this resource exercises DDL generation for tables
+    # without a primary key, so Ash's primary-key requirement is disabled.
+    resource do
+      require_primary_key?(false)
+    end
+
     clickhouse do
       table("no_pkey")
       repo(AshClickhouse.TestRepo)

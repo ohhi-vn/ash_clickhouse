@@ -12,7 +12,7 @@ defmodule AshClickhouse.ClickhouseIntegrationComplexTest do
   use ExUnit.Case, async: false
 
   require Logger
-  import Ash.Query
+  require Ash.Query
 
   alias AshClickhouse.ClickhouseContainer
   alias AshClickhouse.TestRepo

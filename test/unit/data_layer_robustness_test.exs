@@ -65,7 +65,7 @@ defmodule AshClickhouse.DataLayerRobustnessTest do
     defmodule NumericDefaultResource do
       use Ash.Resource,
         data_layer: AshClickhouse.DataLayer,
-        domain: AshClickhouse.TestDomain
+        domain: nil
 
       import AshClickhouse.DataLayer.Dsl.Macros
 
@@ -86,7 +86,7 @@ defmodule AshClickhouse.DataLayerRobustnessTest do
     defmodule StringDefaultResource do
       use Ash.Resource,
         data_layer: AshClickhouse.DataLayer,
-        domain: AshClickhouse.TestDomain
+        domain: nil
 
       import AshClickhouse.DataLayer.Dsl.Macros
 

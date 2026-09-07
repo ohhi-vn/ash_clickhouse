@@ -289,9 +289,6 @@ defmodule AshClickhouse.Release do
             {:ok, _pid} ->
               :ok
 
-            {:error, {:already_started, _pid}} ->
-              :ok
-
             {:error, reason} ->
               Logger.warning(
                 "AshClickhouse.Release: could not start connection for #{inspect(repo)}: " <>

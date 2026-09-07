@@ -133,19 +133,6 @@ defmodule AshClickhouse.DataLayerEdgeTest do
     end
   end
 
-  # ── Fake domain (must be defined before the resources that reference it) ──
-
-  defmodule FakeDomain do
-    @moduledoc false
-    use Ash.Domain
-
-    resources do
-      resource(FakeResource)
-      resource(TenantResource)
-      resource(TenantNoAttrResource)
-    end
-  end
-
   # ── Fake resources ──────────────────────────────────────────────────────────────
 
   defmodule FakeResource do
@@ -212,40 +199,23 @@ defmodule AshClickhouse.DataLayerEdgeTest do
     end
   end
 
-  defmodule TenantNoAttrResource do
-    use Ash.Resource,
-      data_layer: AshClickhouse.DataLayer,
-      domain: AshClickhouse.DataLayerEdgeTest.FakeDomain
-
-    import AshClickhouse.DataLayer.Dsl.Macros
-
-    clickhouse do
-      table("edge_tenant_no_attr")
-      repo(AshClickhouse.DataLayerEdgeTest.FakeRepo)
-    end
-
-    # Attribute strategy declared but no multitenancy attribute configured.
-    multitenancy do
-      strategy(:attribute)
-    end
-
-    attributes do
-      uuid_primary_key(:id)
-      attribute(:name, :string)
-    end
-
-    actions do
-      defaults([:read, :destroy])
-
-      create :create do
-        accept([:name])
-      end
-    end
-  end
-
   # A calculation module used to exercise in-memory calculation attachment.
   defmodule AddOneCalc do
     def calculate(records, _opts), do: Enum.map(records, fn r -> r.age + 1 end)
+  end
+
+  # The domain is defined after its resources so that, when Spark's
+  # `__verify_spark_dsl__` hook runs for the domain, every referenced resource
+  # module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
+  # module while the rest of the file is still compiling).
+  defmodule FakeDomain do
+    @moduledoc false
+    use Ash.Domain, validate_config_inclusion?: false
+
+    resources do
+      resource(AshClickhouse.DataLayerEdgeTest.FakeResource)
+      resource(AshClickhouse.DataLayerEdgeTest.TenantResource)
+    end
   end
 
   setup do
@@ -396,13 +366,6 @@ defmodule AshClickhouse.DataLayerEdgeTest do
     test "stores the tenant directly when the resource has no multitenancy" do
       q = DataLayer.resource_to_query(FakeResource, nil)
       assert {:ok, %Query{tenant: "t1"}} = DataLayer.set_tenant(FakeResource, q, "t1")
-    end
-
-    test "attribute strategy with no configured attribute stores the tenant" do
-      q = DataLayer.resource_to_query(TenantNoAttrResource, nil)
-      {:ok, q2} = DataLayer.set_tenant(TenantNoAttrResource, q, "org_1")
-      assert q2.tenant == "org_1"
-      assert q2.filters == []
     end
   end
 

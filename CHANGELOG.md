@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.3
+
+### Compatibility
+
+- **Ash 3.33 / Elixir 1.20 support.** Ash 3.33 requires applications to set
+  `config :ash, default_string_length_count` (recommended: `:codepoints`, which
+  matches how SQL data layers count string length) once any resource declares a
+  `:string` attribute; this repo's test suite now does so in
+  `config/config.exs`. Test support files were also aligned with the stricter
+  Ash 3.33 compile-time verifiers (domains defined after their resources, fully
+  qualified module references in DSL blocks) to keep the suite warning-free
+  under Elixir 1.20's parallel checker.
+
+### Improvements
+
+- **Removed unreachable clauses flagged by Elixir 1.20 type checking** (no
+  behavior change): the dead `{:error, {:already_started, _}}` clause in
+  `Release.ensure_repo_started/1` (`Connection.start_link/1` already normalizes
+  that case to `{:ok, pid}`), the unused bare atom/binary fallback clauses of
+  `QueryBuilder.ref_name/1`, and the redundant empty-list clause of
+  `DataLayer.build_where_clause/2`, plus an unused `require Logger` in
+  `Telemetry`.
+
 ## 0.7.2
 
 ### Bug fixes
