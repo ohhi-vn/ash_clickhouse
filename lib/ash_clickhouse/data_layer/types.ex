@@ -130,7 +130,10 @@ defmodule AshClickhouse.DataLayer.Types do
 
       is_atom(attr.type) and Code.ensure_loaded?(attr.type) and
           function_exported?(attr.type, :storage_type, 1) ->
-        ash_type_to_clickhouse(attr.type.storage_type(constraints))
+        case attr.type.storage_type(constraints) do
+          binary when is_binary(binary) -> binary
+          other -> ash_type_to_clickhouse(other)
+        end
 
       true ->
         ash_type_to_clickhouse(attr.type)

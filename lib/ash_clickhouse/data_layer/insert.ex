@@ -172,16 +172,21 @@ defmodule AshClickhouse.DataLayer.Insert do
     end)
   end
 
+  @client_insert_opts [:async_insert, :wait_for_async_insert, :database, :settings]
+
   @doc """
   Builds the options forwarded to a bulk insert (async_insert etc.).
+
+  Only ClickHouse-recognized insert keys are forwarded. Ash-internal bulk
+  keys (`batch_size`, `return_records?`, `authorize?`, …) are dropped so they
+  never reach the client.
   """
   @spec insert_opts(module(), keyword()) :: keyword()
   def insert_opts(resource, opts) do
-    merged = Keyword.merge(Dsl.insert_opts(resource), opts)
-
-    merged
-    |> maybe_put(:async_insert, Keyword.get(merged, :async_insert))
-    |> maybe_put(:wait_for_async_insert, Keyword.get(merged, :wait_for_async_insert))
+    resource
+    |> Dsl.insert_opts()
+    |> Keyword.merge(opts)
+    |> Keyword.take(@client_insert_opts)
   end
 
   # --- internal helpers -----------------------------------------------------
@@ -210,9 +215,6 @@ defmodule AshClickhouse.DataLayer.Insert do
     end
   end
 
-  defp maybe_put(opts, _key, nil), do: opts
-  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
-
   # Encoding for the JSON bulk insert path. ClickHouse's JSONCompactEachRow
   # expects native JSON values, so we keep UUIDs as their canonical string form
   # and leave maps/arrays as native JSON values. Decimal structs are rendered as
@@ -221,8 +223,8 @@ defmodule AshClickhouse.DataLayer.Insert do
   # Date/time values are encoded in the unit ClickHouse expects for the
   # resolved column type:
   #
-  #   * `DateTime64(N)` — integer number of microseconds since the Unix epoch
-  #     (the column's precision unit is 10^-N seconds).
+  #   * `DateTime64(N)` — integer number of 10^-N-second ticks since the Unix
+  #     epoch (3 → ms, 6 → µs, 9 → ns).
   #   * `DateTime` — integer number of seconds since the Unix epoch.
   #   * `Date` — integer number of days since 1970-01-01.
   #   * `Time` — the `"HH:MM:SS"` string (time columns are typed `String`).
@@ -267,9 +269,33 @@ defmodule AshClickhouse.DataLayer.Insert do
   end
 
   defp encode_datetime(%DateTime{} = datetime, attr) do
-    case Types.resolve_attr_type(attr) do
-      "DateTime64(" <> _ -> DateTime.to_unix(datetime, :microsecond)
-      _ -> DateTime.to_unix(datetime, :second)
+    case parse_datetime64_precision(Types.resolve_attr_type(attr)) do
+      {:precision, 3} -> DateTime.to_unix(datetime, :millisecond)
+      {:precision, 6} -> DateTime.to_unix(datetime, :microsecond)
+      {:precision, 9} -> DateTime.to_unix(datetime, :nanosecond)
+      {:precision, precision} -> scale_unix(datetime, precision)
+      :second -> DateTime.to_unix(datetime, :second)
     end
   end
+
+  defp parse_datetime64_precision("DateTime64(" <> rest) do
+    case Regex.run(~r/^(\d+)/, rest) do
+      [_, digits] -> {:precision, String.to_integer(digits)}
+      _ -> {:precision, 6}
+    end
+  end
+
+  defp parse_datetime64_precision(_), do: :second
+
+  defp scale_unix(datetime, precision) when precision < 6 do
+    micro = DateTime.to_unix(datetime, :microsecond)
+    div(micro, Integer.pow(10, 6 - precision))
+  end
+
+  defp scale_unix(datetime, precision) when precision > 6 do
+    micro = DateTime.to_unix(datetime, :microsecond)
+    micro * Integer.pow(10, precision - 6)
+  end
+
+  defp scale_unix(datetime, _precision), do: DateTime.to_unix(datetime, :microsecond)
 end

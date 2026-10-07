@@ -163,8 +163,10 @@ defmodule AshClickhouse.Connection do
 
   `statement` must be a fully-formed `INSERT INTO <table> (...) FORMAT
   JSONCompactEachRow` query; `rows` is a list of value-lists (one per row) in the
-  same column order as the statement. Options are forwarded to the underlying
-  client (e.g. `async_insert`/`wait_for_async_insert`).
+  same column order as the statement. Only ClickHouse-recognized insert keys
+  are forwarded to the underlying client (`async_insert`,
+  `wait_for_async_insert`, `database`, `settings`); any other keys are
+  dropped before the client call.
   """
   @spec insert_rows(t() | atom(), String.t(), [list()], keyword()) ::
           {:ok, term()} | {:error, term()}

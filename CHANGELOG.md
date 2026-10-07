@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4
+
+- **Failed to write DateTime type when using `Ash.bulk_create/4`.**
+
+### Bug fixes
+
 ## 0.7.3
 
 ### Compatibility

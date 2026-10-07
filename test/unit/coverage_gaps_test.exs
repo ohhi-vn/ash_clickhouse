@@ -821,6 +821,12 @@ defmodule AshClickhouse.CoverageGapsTest do
     end
   end
 
+  defmodule PlainSecondDateTime do
+    use Ash.Type.NewType, subtype_of: :utc_datetime
+
+    def storage_type(_), do: "DateTime"
+  end
+
   defmodule SecondPrecisionDateTimeResource do
     use Ash.Resource, data_layer: AshClickhouse.DataLayer, domain: nil
 
@@ -833,7 +839,7 @@ defmodule AshClickhouse.CoverageGapsTest do
 
     attributes do
       uuid_primary_key(:id)
-      attribute(:at, :utc_datetime)
+      attribute(:at, PlainSecondDateTime)
     end
   end
 
@@ -876,7 +882,7 @@ defmodule AshClickhouse.CoverageGapsTest do
              ) ==
                :weird_term
 
-      # `DateTime` on a plain `DateTime` column encodes as epoch seconds.
+      # `DateTime` on a `DateTime64(6)` column encodes as micros.
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       assert elem(
@@ -911,7 +917,7 @@ defmodule AshClickhouse.CoverageGapsTest do
                1
              ) == [[uuid, nil]]
 
-      # A DateTime on a second-precision column encodes as epoch seconds.
+      # A DateTime on a second-precision (plain DateTime) column encodes as epoch seconds.
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       assert elem(
@@ -920,7 +926,7 @@ defmodule AshClickhouse.CoverageGapsTest do
                  SecondPrecisionDateTimeResource
                ),
                1
-             ) == [[nil, 1_704_164_645_000_000]]
+             ) == [[nil, 1_704_164_645]]
     end
 
     test "changeset_to_insert_attrs fills in a missing uuid pk typed as the module" do

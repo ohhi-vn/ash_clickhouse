@@ -26,3 +26,6 @@ ash_clickhouse-*.tar
 
 deps
 .DS_Store
+._*
+.opencode
+.dexter.db*

@@ -43,6 +43,29 @@ defmodule AshClickhouse.InsertTest do
     end
   end
 
+  defmodule DateTime64Ms do
+    use Ash.Type.NewType, subtype_of: :utc_datetime
+
+    def storage_type(_), do: "DateTime64(3)"
+  end
+
+  defmodule DateTime64Ns do
+    use Ash.Type.NewType, subtype_of: :utc_datetime
+
+    def storage_type(_), do: "DateTime64(9)"
+  end
+
+  defmodule PrecisionResource do
+    use Ash.Resource, data_layer: AshClickhouse.DataLayer, domain: nil
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:ms, DateTime64Ms)
+      attribute(:us, :utc_datetime)
+      attribute(:ns, DateTime64Ns)
+    end
+  end
+
   defmodule InsertOptsResource do
     use Ash.Resource,
       data_layer: AshClickhouse.DataLayer,
@@ -133,6 +156,43 @@ defmodule AshClickhouse.InsertTest do
 
       assert opts[:async_insert] == 1
       assert opts[:wait_for_async_insert] == 1
+    end
+
+    test "drops Ash-internal bulk keys" do
+      opts =
+        Insert.insert_opts(InsertOptsResource,
+          return_records?: true,
+          batch_size: 5,
+          authorize?: true,
+          tenant: "t",
+          async_insert: 1
+        )
+
+      assert opts[:async_insert] == 1
+      refute Keyword.has_key?(opts, :return_records?)
+      refute Keyword.has_key?(opts, :batch_size)
+      refute Keyword.has_key?(opts, :authorize?)
+      refute Keyword.has_key?(opts, :tenant)
+    end
+  end
+
+  describe "DateTime64 precision scaling" do
+    test "encodes ms/us/ns and plain seconds per resolved type" do
+      {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
+      {:ok, naive} = NaiveDateTime.from_iso8601("2024-01-02T03:04:05")
+
+      {_fields, [encoded]} =
+        Insert.build_insert_rows([%{"ms" => dt, "us" => dt, "ns" => dt}], PrecisionResource)
+
+      assert encoded == [nil, 1_704_164_645_000, 1_704_164_645_000_000, 1_704_164_645_000_000_000]
+
+      {_fields, [encoded_naive]} =
+        Insert.build_insert_rows(
+          [%{"ms" => naive, "us" => naive, "ns" => naive}],
+          PrecisionResource
+        )
+
+      assert encoded_naive == encoded
     end
   end
 end
