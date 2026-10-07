@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.6
+
+### Remove duplicated logger
+
+Update error & warning log in handle_result to avoid duplicated message.
+
 ## 0.7.5
 
 ### Bug fixes

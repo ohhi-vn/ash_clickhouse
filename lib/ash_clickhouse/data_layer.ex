@@ -871,12 +871,17 @@ defmodule AshClickhouse.DataLayer do
   # Already-wrapped errors pass through unchanged.
   defp handle_result({:error, %Error.ClickhouseError{}} = error), do: error
 
+  # Logged at `:debug`, not `:warning`/`:error`. The data layer returns these as
+  # errors; logging them at a visible level duplicates the caller's own reporting
+  # and, for a logger that writes to the same destination it is failing against,
+  # feeds a fresh row describing each failure back into the failing pipeline. A
+  # caller that wants a visible report already has the returned error.
   defp handle_result({:error, error}) do
     if Error.client_error?(error) do
-      Logger.warning("ClickHouse error: #{Exception.message(error)}")
+      Logger.debug("ClickHouse error: #{Exception.message(error)}")
       {:error, Error.wrap_clickhouse_error(error)}
     else
-      Logger.error("Unexpected error: #{inspect(error)}")
+      Logger.debug("Unexpected error: #{inspect(error)}")
       {:error, Error.wrap_clickhouse_error(error)}
     end
   end
