@@ -55,6 +55,12 @@ defmodule AshClickhouse.InsertTest do
     def storage_type(_), do: "DateTime64(9)"
   end
 
+  defmodule PlainSecondDateTime do
+    use Ash.Type.NewType, subtype_of: :utc_datetime
+
+    def storage_type(_), do: "DateTime"
+  end
+
   defmodule PrecisionResource do
     use Ash.Resource, data_layer: AshClickhouse.DataLayer, domain: nil
 
@@ -63,6 +69,7 @@ defmodule AshClickhouse.InsertTest do
       attribute(:ms, DateTime64Ms)
       attribute(:us, :utc_datetime)
       attribute(:ns, DateTime64Ns)
+      attribute(:plain, PlainSecondDateTime)
     end
   end
 
@@ -109,8 +116,8 @@ defmodule AshClickhouse.InsertTest do
 
       assert Enum.member?(fields, "`id`")
       assert values["`id`"] == uuid
-      assert values["`created_at`"] == 1_704_164_645_000_000
-      assert values["`starts_at`"] == 1_704_164_645_000_000
+      assert values["`created_at`"] == 1_704_164_645.0
+      assert values["`starts_at`"] == 1_704_164_645.0
       assert values["`day`"] == 19_724
       assert values["`clock`"] == "03:04:05"
       assert values["`amount`"] == "12.34"
@@ -177,22 +184,48 @@ defmodule AshClickhouse.InsertTest do
   end
 
   describe "DateTime64 precision scaling" do
-    test "encodes ms/us/ns and plain seconds per resolved type" do
+    test "encodes DateTime64 as fractional seconds and plain DateTime as epoch seconds" do
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
-      {:ok, naive} = NaiveDateTime.from_iso8601("2024-01-02T03:04:05")
 
       {_fields, [encoded]} =
-        Insert.build_insert_rows([%{"ms" => dt, "us" => dt, "ns" => dt}], PrecisionResource)
-
-      assert encoded == [nil, 1_704_164_645_000, 1_704_164_645_000_000, 1_704_164_645_000_000_000]
-
-      {_fields, [encoded_naive]} =
         Insert.build_insert_rows(
-          [%{"ms" => naive, "us" => naive, "ns" => naive}],
+          [%{"ms" => dt, "us" => dt, "ns" => dt, "plain" => dt}],
           PrecisionResource
         )
 
-      assert encoded_naive == encoded
+      assert encoded == [nil, 1_704_164_645.0, 1_704_164_645.0, 1_704_164_645.0, 1_704_164_645]
+    end
+
+    test "preserves microseconds in the fractional-seconds value" do
+      {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05.123456Z")
+
+      {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
+
+      assert [nil, nil, value, nil, nil] = encoded
+      assert value == 1_704_164_645.123456
+    end
+
+    test "DateTime64 values are floats, not integer tick counts" do
+      {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
+
+      {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
+
+      assert [nil, nil, value, nil, nil] = encoded
+      assert is_float(value)
+      refute is_integer(value)
+    end
+
+    test "NaiveDateTime encodes identically to its UTC DateTime equivalent" do
+      {:ok, naive} = NaiveDateTime.from_iso8601("2024-01-02T03:04:05.123456")
+      {:ok, dt} = DateTime.from_naive(naive, "Etc/UTC")
+
+      {_fields, [encoded_naive]} =
+        Insert.build_insert_rows([%{"us" => naive}], PrecisionResource)
+
+      {_fields, [encoded_dt]} =
+        Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
+
+      assert encoded_naive == encoded_dt
     end
   end
 end

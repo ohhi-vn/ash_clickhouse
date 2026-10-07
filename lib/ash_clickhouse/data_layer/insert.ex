@@ -223,8 +223,11 @@ defmodule AshClickhouse.DataLayer.Insert do
   # Date/time values are encoded in the unit ClickHouse expects for the
   # resolved column type:
   #
-  #   * `DateTime64(N)` — integer number of 10^-N-second ticks since the Unix
-  #     epoch (3 → ms, 6 → µs, 9 → ns).
+  #   * `DateTime64(N)` — fractional seconds since the Unix epoch. ClickHouse's
+  #     `FORMAT JSONCompactEachRow` input reads a `DateTime64` JSON number as
+  #     seconds, so a raw scaled tick count overflows the column; a fractional
+  #     number carries the sub-second part the column keeps. The column's own
+  #     precision decides any truncation, so the value does not vary by `N`.
   #   * `DateTime` — integer number of seconds since the Unix epoch.
   #   * `Date` — integer number of days since 1970-01-01.
   #   * `Time` — the `"HH:MM:SS"` string (time columns are typed `String`).
@@ -269,33 +272,13 @@ defmodule AshClickhouse.DataLayer.Insert do
   end
 
   defp encode_datetime(%DateTime{} = datetime, attr) do
-    case parse_datetime64_precision(Types.resolve_attr_type(attr)) do
-      {:precision, 3} -> DateTime.to_unix(datetime, :millisecond)
-      {:precision, 6} -> DateTime.to_unix(datetime, :microsecond)
-      {:precision, 9} -> DateTime.to_unix(datetime, :nanosecond)
-      {:precision, precision} -> scale_unix(datetime, precision)
-      :second -> DateTime.to_unix(datetime, :second)
+    if datetime64?(Types.resolve_attr_type(attr)) do
+      DateTime.to_unix(datetime, :microsecond) / 1_000_000
+    else
+      DateTime.to_unix(datetime, :second)
     end
   end
 
-  defp parse_datetime64_precision("DateTime64(" <> rest) do
-    case Regex.run(~r/^(\d+)/, rest) do
-      [_, digits] -> {:precision, String.to_integer(digits)}
-      _ -> {:precision, 6}
-    end
-  end
-
-  defp parse_datetime64_precision(_), do: :second
-
-  defp scale_unix(datetime, precision) when precision < 6 do
-    micro = DateTime.to_unix(datetime, :microsecond)
-    div(micro, Integer.pow(10, 6 - precision))
-  end
-
-  defp scale_unix(datetime, precision) when precision > 6 do
-    micro = DateTime.to_unix(datetime, :microsecond)
-    micro * Integer.pow(10, precision - 6)
-  end
-
-  defp scale_unix(datetime, _precision), do: DateTime.to_unix(datetime, :microsecond)
+  defp datetime64?("DateTime64(" <> _), do: true
+  defp datetime64?(_), do: false
 end

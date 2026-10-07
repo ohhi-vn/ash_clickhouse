@@ -117,6 +117,39 @@ defmodule AshClickhouse.TestBulkResource do
   end
 end
 
+defmodule AshClickhouse.TestBulkDateTimeResource do
+  @moduledoc """
+  A ClickHouse-backed Ash resource with a `DateTime64(6)` column, used by the
+  bulk_create integration tests to prove a raw datetime round-trips.
+  """
+  use Ash.Resource,
+    data_layer: AshClickhouse.DataLayer,
+    domain: AshClickhouse.TestDomain
+
+  import AshClickhouse.DataLayer.Dsl.Macros
+
+  clickhouse do
+    table("bulk_datetimes")
+    repo(AshClickhouse.TestRepo)
+    database("ash_clickhouse_test")
+    engine("MergeTree()")
+    order_by("id")
+  end
+
+  attributes do
+    uuid_primary_key(:id)
+    attribute(:at, :utc_datetime_usec, allow_nil?: false)
+  end
+
+  actions do
+    defaults([:read, :destroy])
+
+    create :create do
+      accept([:at])
+    end
+  end
+end
+
 # The domain is defined after its resources so that, when Spark's
 # `__verify_spark_dsl__` hook runs for the domain, every referenced resource
 # module is already compiled (Elixir >= 1.19 runs `@after_verify` eagerly per
@@ -129,5 +162,6 @@ defmodule AshClickhouse.TestDomain do
     resource(AshClickhouse.TestResource)
     resource(AshClickhouse.TestPartitionedResource)
     resource(AshClickhouse.TestBulkResource)
+    resource(AshClickhouse.TestBulkDateTimeResource)
   end
 end

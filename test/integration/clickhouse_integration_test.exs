@@ -314,6 +314,26 @@ defmodule AshClickhouse.ClickhouseIntegrationTest do
     after
       TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_users", [])
     end
+
+    test "writes a raw DateTime and reads it back at full microsecond precision", context do
+      :ok = skip_unless_connected(context)
+
+      resource = AshClickhouse.TestBulkDateTimeResource
+
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_datetimes", [])
+      TestRepo.query!(AshClickhouse.Migration.create_table_cql(resource), [])
+
+      at = ~U[2024-01-02 03:04:05.123456Z]
+
+      changeset = Ash.Changeset.for_create(resource, :create, %{at: at})
+
+      assert {:ok, _stream} = AshClickhouse.DataLayer.bulk_create(resource, [changeset], [])
+
+      assert [record] = Ash.read!(resource)
+      assert record.at == at
+    after
+      TestRepo.query!("DROP TABLE IF EXISTS #{@test_database}.bulk_datetimes", [])
+    end
   end
 
   # ── update_query / destroy_query ───────────────────────────────────────────

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.5
+
+### Bug fixes
+
+- **Bulk `DateTime64` writes now send fractional Unix seconds.** 0.7.4's
+  precision-aware encoder emitted raw scaled tick counts (integer microseconds
+  for `DateTime64(6)`), but ClickHouse's `FORMAT JSONCompactEachRow` input reads
+  a `DateTime64` JSON number as *seconds*, so every timestamp write failed with
+  `Code: 407 DECIMAL_OVERFLOW` (or landed near 1970 for smaller values). The
+  bulk encoder now writes `DateTime64` values as fractional seconds, which
+  ClickHouse accepts while preserving microseconds; the column's own precision
+  decides any truncation. `DateTime` columns still use integer epoch seconds, and
+  `Date`/`Time` are unchanged.
+
+### Downstream
+
+- **`clickhouse_ex_logger` must raise its `ash_clickhouse` floor from `~> 0.7.4`
+  to `~> 0.7.5`.** Its in-flight `collapse-insert-to-ash-bulk-create` change
+  removed the ISO-8601 timestamp workaround on the false premise that 0.7.4
+  fixed this encoding; until it depends on 0.7.5 the collapse cannot write
+  timestamps.
+
 ## 0.7.4
 
 - **Failed to write DateTime type when using `Ash.bulk_create/4`.**
