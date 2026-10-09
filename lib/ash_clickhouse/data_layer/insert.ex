@@ -223,11 +223,12 @@ defmodule AshClickhouse.DataLayer.Insert do
   # Date/time values are encoded in the unit ClickHouse expects for the
   # resolved column type:
   #
-  #   * `DateTime64(N)` — fractional seconds since the Unix epoch. ClickHouse's
-  #     `FORMAT JSONCompactEachRow` input reads a `DateTime64` JSON number as
-  #     seconds, so a raw scaled tick count overflows the column; a fractional
-  #     number carries the sub-second part the column keeps. The column's own
-  #     precision decides any truncation, so the value does not vary by `N`.
+  #   * `DateTime64(N)` — a quoted decimal Unix-seconds string, e.g.
+  #     `"1704164645.123456"`. A JSON *number* is avoided because ClickHouse's
+  #     numeric interpretation of `DateTime64` varies by server version and
+  #     `input_format_read_datetime_number_as_raw_value`; the decimal text form
+  #     is parsed deterministically. The column's own precision decides any
+  #     truncation, so the value does not vary by `N`.
   #   * `DateTime` — integer number of seconds since the Unix epoch.
   #   * `Date` — integer number of days since 1970-01-01.
   #   * `Time` — the `"HH:MM:SS"` string (time columns are typed `String`).
@@ -273,10 +274,28 @@ defmodule AshClickhouse.DataLayer.Insert do
 
   defp encode_datetime(%DateTime{} = datetime, attr) do
     if datetime64?(Types.resolve_attr_type(attr)) do
-      DateTime.to_unix(datetime, :microsecond) / 1_000_000
+      datetime
+      |> DateTime.to_unix(:microsecond)
+      |> encode_unix_microseconds()
     else
       DateTime.to_unix(datetime, :second)
     end
+  end
+
+  # Renders signed Unix microseconds as ClickHouse's decimal Unix-seconds text
+  # form, e.g. `1704164645123456` -> `"1704164645.123456"`. Kept as a quoted
+  # string because ClickHouse's JSON *number* handling of `DateTime64` varies by
+  # version (26.8 changed a bare integer from raw ticks to seconds) and by
+  # `input_format_read_datetime_number_as_raw_value`; the decimal text form is
+  # parsed deterministically by both the `basic` and `best_effort` parsers.
+  defp encode_unix_microseconds(microseconds) do
+    sign = if microseconds < 0, do: "-", else: ""
+
+    absolute = abs(microseconds)
+    whole = div(absolute, 1_000_000)
+    fraction = rem(absolute, 1_000_000)
+
+    "#{sign}#{whole}.#{fraction |> Integer.to_string() |> String.pad_leading(6, "0")}"
   end
 
   defp datetime64?("DateTime64(" <> _), do: true

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.7
+
+### Bug fixes
+
+- **`DateTime64` inserts now send a quoted decimal Unix-seconds string.** 0.7.5
+  sent fractional Unix seconds as a JSON *number*, but ClickHouse's numeric
+  interpretation of a `DateTime64` value is not stable: 26.8 changed a bare
+  integer from raw ticks to seconds, and `input_format_read_datetime_number_as_raw_value`
+  toggles the reading. On affected 26.9 servers the value is rejected with
+  `Code: 407 DECIMAL_OVERFLOW` (`Numeric value is out of range for DateTime64`)
+  while the async-insert buffer is read. The encoder now writes
+  `"<whole-seconds>.<six-digit-microseconds>"` (for example `"1704164645.123456"`),
+  which ClickHouse's `basic` and `best_effort` date/time text parsers accept
+  deterministically, independent of version, numeric-input settings, and time
+  zone. Plain `DateTime` columns still use integer epoch seconds; `Date` and
+  `Time` are unchanged.
+
 ## 0.7.6
 
 ### Remove duplicated logger

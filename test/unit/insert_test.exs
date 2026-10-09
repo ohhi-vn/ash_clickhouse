@@ -116,8 +116,8 @@ defmodule AshClickhouse.InsertTest do
 
       assert Enum.member?(fields, "`id`")
       assert values["`id`"] == uuid
-      assert values["`created_at`"] == 1_704_164_645.0
-      assert values["`starts_at`"] == 1_704_164_645.0
+      assert values["`created_at`"] == "1704164645.000000"
+      assert values["`starts_at`"] == "1704164645.000000"
       assert values["`day`"] == 19_724
       assert values["`clock`"] == "03:04:05"
       assert values["`amount`"] == "12.34"
@@ -183,8 +183,8 @@ defmodule AshClickhouse.InsertTest do
     end
   end
 
-  describe "DateTime64 precision scaling" do
-    test "encodes DateTime64 as fractional seconds and plain DateTime as epoch seconds" do
+  describe "DateTime64 decimal Unix-seconds encoding" do
+    test "encodes DateTime64 as decimal Unix-seconds strings and plain DateTime as epoch seconds" do
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       {_fields, [encoded]} =
@@ -193,26 +193,54 @@ defmodule AshClickhouse.InsertTest do
           PrecisionResource
         )
 
-      assert encoded == [nil, 1_704_164_645.0, 1_704_164_645.0, 1_704_164_645.0, 1_704_164_645]
+      assert encoded == [
+               nil,
+               "1704164645.000000",
+               "1704164645.000000",
+               "1704164645.000000",
+               1_704_164_645
+             ]
     end
 
-    test "preserves microseconds in the fractional-seconds value" do
+    test "preserves microseconds in the decimal-Unix-seconds value" do
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05.123456Z")
 
       {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
 
       assert [nil, nil, value, nil, nil] = encoded
-      assert value == 1_704_164_645.123456
+      assert value == "1704164645.123456"
     end
 
-    test "DateTime64 values are floats, not integer tick counts" do
+    test "DateTime64 values are JSON strings, not numbers or integer tick counts" do
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
 
       assert [nil, nil, value, nil, nil] = encoded
-      assert is_float(value)
-      refute is_integer(value)
+      assert is_binary(value)
+      refute is_number(value)
+    end
+
+    test "every DateTime64 precision uses the identical decimal Unix-seconds string" do
+      {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05.123456Z")
+
+      {_fields, [encoded]} =
+        Insert.build_insert_rows(
+          [%{"ms" => dt, "us" => dt, "ns" => dt}],
+          PrecisionResource
+        )
+
+      assert [nil, "1704164645.123456", "1704164645.123456", "1704164645.123456", nil] =
+               encoded
+    end
+
+    test "encodes pre-1970 instants as signed decimal Unix seconds" do
+      {:ok, dt, _} = DateTime.from_iso8601("1969-12-31T23:59:59.876544Z")
+
+      {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
+
+      assert [nil, nil, value, nil, nil] = encoded
+      assert value == "-0.123456"
     end
 
     test "NaiveDateTime encodes identically to its UTC DateTime equivalent" do

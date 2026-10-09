@@ -882,7 +882,7 @@ defmodule AshClickhouse.CoverageGapsTest do
              ) ==
                :weird_term
 
-      # `DateTime` on a `DateTime64(6)` column encodes as fractional seconds.
+      # `DateTime` on a `DateTime64(6)` column encodes as decimal Unix seconds.
       {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05Z")
 
       assert elem(
@@ -891,7 +891,7 @@ defmodule AshClickhouse.CoverageGapsTest do
                  DateTimeResource
                ),
                1
-             ) == [[nil, 1_704_164_645.0]]
+             ) == [[nil, "1704164645.000000"]]
     end
 
     test "encode_bulk_value handles NaiveDateTime, 16-byte UUID binaries and plain DateTime columns" do
@@ -903,7 +903,7 @@ defmodule AshClickhouse.CoverageGapsTest do
                  DateTimeResource
                ),
                1
-             ) == [[nil, 1_704_164_645.0]]
+             ) == [[nil, "1704164645.000000"]]
 
       # A 16-byte binary in a UUID column is converted to its string form.
       uuid = "123e4567-e89b-12d3-a456-426614174000"

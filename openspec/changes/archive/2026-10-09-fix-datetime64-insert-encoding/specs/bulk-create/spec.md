@@ -1,34 +1,6 @@
-# bulk-create Specification
+# Spec Delta
 
-## Purpose
-
-Makes Ash bulk inserts a reliable write path to ClickHouse so callers can use `Ash.bulk_create/4` directly instead of a downstream workaround module.
-
-## Requirements
-
-### Requirement: Bulk create forwards only ClickHouse-recognized insert options
-
-The system SHALL sanitize options before calling the ClickHouse client so Ash-internal bulk keys never reach the client.
-
-#### Scenario: Ash bulk keys are stripped
-
-- **WHEN** `bulk_create` is invoked with Ash keys such as `return_records?`, `batch_size`, `return_errors?`, `authorize?`, `tenant`, `tracer`, `action`, or `resource`
-- **THEN** none of those keys appears in the keyword list passed to `repo.insert_rows/3`
-
-#### Scenario: Configured insert options still apply
-
-- **WHEN** a resource configures `insert_opts` (e.g. `async_insert`, `wait_for_async_insert`)
-- **THEN** those configured values are forwarded to `repo.insert_rows/3`
-
-#### Scenario: Explicit caller insert flags still apply
-
-- **WHEN** the caller passes `async_insert` or `wait_for_async_insert` to `bulk_create`
-- **THEN** those values override/merge with the resource defaults in the forwarded list
-
-#### Scenario: Batching and return semantics are unchanged
-
-- **WHEN** `bulk_create` receives `batch_size` and `return_records?`
-- **THEN** the system chunks rows by `batch_size` (default 1000, capped at 100_000) and returns a record stream only when `return_records?` is true
+## MODIFIED Requirements
 
 ### Requirement: Bulk DateTime64 encoding uses fractional Unix seconds
 
