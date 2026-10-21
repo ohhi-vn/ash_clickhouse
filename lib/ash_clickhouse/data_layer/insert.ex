@@ -298,6 +298,16 @@ defmodule AshClickhouse.DataLayer.Insert do
     "#{sign}#{whole}.#{fraction |> Integer.to_string() |> String.pad_leading(6, "0")}"
   end
 
-  defp datetime64?("DateTime64(" <> _), do: true
-  defp datetime64?(_), do: false
+  # Recognises the `DateTime64` type family: `DateTime64`, `DateTime64(N)` and
+  # `DateTime64(N, 'UTC')`. The prefix test is on `"DateTime64"` and not on
+  # `"DateTime"` because every `DateTime64` type name also starts with
+  # `"DateTime"` — a plain `DateTime` column is the remaining case.
+  #
+  # Matching the family rather than the `"DateTime64("` literal matters: a
+  # `DateTime64` column declared without an explicit precision (ClickHouse's
+  # default precision is 3) would otherwise fall through to the plain
+  # `DateTime` branch and be written as a bare integer number of seconds —
+  # the form whose meaning changes with the server version and with
+  # `input_format_read_datetime_number_as_raw_value`.
+  defp datetime64?(type), do: String.starts_with?(type, "DateTime64")
 end

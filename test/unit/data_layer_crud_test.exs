@@ -287,29 +287,48 @@ defmodule AshClickhouse.DataLayerCrudTest do
       assert DataLayer.lock(q, :for_update, FakeResource) == {:ok, q}
     end
 
-    test "combination_of/3 returns a QueryError" do
+    test "combination_of/3 builds a query that combines the parts" do
       q = DataLayer.resource_to_query(FakeResource, nil)
 
-      assert {:error, %AshClickhouse.Error.QueryError{}} =
-               DataLayer.combination_of(q, :union, FakeResource)
+      assert {:ok, combined} = DataLayer.combination_of([{:base, q}], FakeResource, nil)
+      assert combined.combination_of == [{:base, q}]
     end
 
-    test "calculate/3 stores the calculation in context" do
+    test "combination_of/3 refuses a combination without parts" do
       q = DataLayer.resource_to_query(FakeResource, nil)
-      calc = %{name: :full_name, module: nil, opts: []}
-      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
-      assert q2.context.calculations == [calc]
+
+      assert {:error, _reason} = DataLayer.combination_of([], FakeResource, nil)
     end
 
-    test "add_aggregate/3 and add_aggregates/3 store aggregates in context" do
+    test "add_calculations/3 projects a translatable calculation into the select list" do
+      q = DataLayer.resource_to_query(FakeResource, nil)
+
+      calculation = %Ash.Query.Calculation{
+        name: :full_name,
+        module: Ash.Resource.Calculation.Expression,
+        opts: [expr: :name],
+        type: Ash.Type.String
+      }
+
+      expression = %Ash.Query.Ref{attribute: :name, relationship_path: []}
+
+      {:ok, q2} = DataLayer.add_calculations(q, [{calculation, expression}], FakeResource)
+
+      assert {:full_name, sql} = List.last(q2.select)
+      assert sql =~ "`name`"
+    end
+
+    test "add_aggregate/3 and add_aggregates/3 store aggregates on the query" do
       q = DataLayer.resource_to_query(FakeResource, nil)
       agg = %Ash.Query.Aggregate{kind: :count, name: :cnt, field: nil, resource: FakeResource}
 
       {:ok, q2} = DataLayer.add_aggregate(q, agg, FakeResource)
-      assert q2.context.aggregates == [agg]
+      assert q2.aggregates == [agg]
 
+      # Ash calls `add_aggregates/3` twice with the same list; the aggregates
+      # are de-duplicated by name so the aggregate is issued once.
       {:ok, q3} = DataLayer.add_aggregates(q2, [agg, agg], FakeResource)
-      assert length(q3.context.aggregates) == 3
+      assert length(q3.aggregates) == 1
     end
   end
 

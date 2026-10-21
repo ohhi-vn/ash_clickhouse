@@ -103,7 +103,7 @@ defmodule AshClickhouseTest do
       refute AshClickhouse.DataLayer.can?(nil, :keyset)
       refute AshClickhouse.DataLayer.can?(nil, :upsert)
       refute AshClickhouse.DataLayer.can?(nil, :join)
-      refute AshClickhouse.DataLayer.can?(nil, :combine)
+      assert AshClickhouse.DataLayer.can?(nil, :combine)
     end
   end
 end

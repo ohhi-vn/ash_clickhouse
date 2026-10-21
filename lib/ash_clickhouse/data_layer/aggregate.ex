@@ -6,12 +6,17 @@ defmodule AshClickhouse.DataLayer.Aggregate do
   `COUNT/SUM/AVG/MIN/MAX` queries plus batched relationship aggregates) lives in
   one focused module. Relationship aggregates are computed with one grouped query
   per aggregate across the whole result set rather than one query per record.
+
+  An aggregate's own `filter`, `sort` and `join_filters` are applied to the
+  rows the aggregate considers, so a filtered aggregate reports the value of
+  the matching rows rather than of every row.
   """
 
   require Logger
 
   alias Ash.Resource.Info
   alias AshClickhouse.DataLayer
+  alias AshClickhouse.DataLayer.QueryBuilder
   alias AshClickhouse.DataLayer.Types
   alias AshClickhouse.Identifier
 
@@ -23,12 +28,12 @@ defmodule AshClickhouse.DataLayer.Aggregate do
           {:ok, map()} | {:error, term()}
   def run(aggregates, resource, repo, qualified, where_clause, where_params) do
     Enum.reduce_while(aggregates, %{}, fn aggregate, acc ->
-      case build_aggregate_query(aggregate, qualified, where_clause) do
+      case build_aggregate_query(aggregate, qualified, where_clause, where_params, resource) do
         {:error, reason} ->
           {:halt, {:error, reason}}
 
-        {query, _params} ->
-          run_one(resource, repo, query, where_params, acc, aggregate)
+        {query, params} ->
+          run_one(resource, repo, query, params, acc, aggregate)
       end
     end)
   end
@@ -58,7 +63,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
       agg_values =
         Map.new(aggregates, fn aggregate ->
           values = Map.fetch!(aggregate_maps, aggregate.name)
-          {aggregate.name, Map.get(values, pk_key, aggregate.default_value)}
+          {aggregate.name, Map.get(values, pk_key, default_value(aggregate))}
         end)
 
       Map.update!(record, :aggregates, &Map.merge(&1, agg_values))
@@ -71,19 +76,44 @@ defmodule AshClickhouse.DataLayer.Aggregate do
     opts = DataLayer.build_opts(resource)
 
     case repo.query(query, params, opts) do
-      {:ok, %ClickHouse.Result{rows: [[value]]}} ->
-        {:cont,
-         Map.put(
-           acc,
-           aggregate.name,
-           decode_aggregate(value, aggregate.kind, aggregate.field, resource)
-         )}
-
-      {:ok, %ClickHouse.Result{rows: []}} ->
-        {:cont, Map.put(acc, aggregate.name, Map.get(aggregate, :default_value))}
+      {:ok, %ClickHouse.Result{rows: rows}} ->
+        {:cont, Map.put(acc, aggregate.name, decode_rows(rows, aggregate, resource))}
 
       {:error, reason} ->
         {:halt, {:error, reason}}
+    end
+  end
+
+  # Folds the rows an aggregate query returned into the aggregate's value.
+  #
+  # A `count` over no rows is zero rather than absent; a `first` over no rows
+  # falls back to the aggregate's declared default.
+  @spec decode_rows(list(), map(), module()) :: term()
+  defp decode_rows([], aggregate, _resource), do: default_value(aggregate)
+
+  defp decode_rows(rows, aggregate, resource) do
+    kind = Map.get(aggregate, :kind)
+    field = Map.get(aggregate, :field)
+
+    case kind do
+      :count ->
+        rows
+        |> List.first()
+        |> List.first()
+        |> decode_aggregate(:count, field, resource)
+
+      :exists ->
+        true
+
+      :list ->
+        rows
+        |> Enum.map(fn row -> row |> List.first() |> decode_list_item(field, resource) end)
+
+      _ ->
+        rows
+        |> List.first()
+        |> List.first()
+        |> decode_aggregate(kind, field, resource)
     end
   end
 
@@ -94,7 +124,8 @@ defmodule AshClickhouse.DataLayer.Aggregate do
     Types.decode_value(value, %{type: :integer})
   end
 
-  defp decode_aggregate(value, kind, field, resource) when kind in [:sum, :min, :max, :avg] do
+  defp decode_aggregate(value, kind, field, resource)
+       when kind in [:sum, :min, :max, :avg, :first] do
     case resolve_field_attr(field, resource) do
       %{} = attr ->
         # `avg` over a Decimal column would lose precision as a float; decode
@@ -106,7 +137,27 @@ defmodule AshClickhouse.DataLayer.Aggregate do
     end
   end
 
+  defp decode_aggregate(value, :exists, _field, _resource) do
+    Types.decode_value(value, %{type: :boolean})
+  end
+
   defp decode_aggregate(value, _kind, _field, _resource), do: value
+
+  # A `list` aggregate returns one value per matching row. When the aggregate
+  # declares a sort, the rows arrive as `(sort key..., value)` tuples and the
+  # value is the last element of the tuple.
+  @spec decode_list_item(term(), term(), module()) :: term()
+  defp decode_list_item(item, field, resource) when is_list(item) do
+    item
+    |> List.last()
+    |> decode_aggregate(:first, field, resource)
+  end
+
+  defp decode_list_item(item, field, resource) do
+    decode_aggregate(item, :first, field, resource)
+  end
+
+  defp default_value(aggregate), do: Map.get(aggregate, :default_value)
 
   defp resolve_field_attr(nil, _resource), do: nil
   defp resolve_field_attr(%{name: name}, resource), do: resolve_field_attr(name, resource)
@@ -132,14 +183,21 @@ defmodule AshClickhouse.DataLayer.Aggregate do
   # owning key, computed with a single grouped query instead of N individual
   # ones.
   defp batched_values(aggregate, records, pkey, resource, repo, opts, uuid_fields) do
-    %{kind: kind, field: field, relationship_path: path} = aggregate
+    %{relationship_path: path} = aggregate
+
+    context = %{
+      resource: resource,
+      repo: repo,
+      opts: opts,
+      uuid_fields: uuid_fields
+    }
 
     case path do
       [] ->
-        batched_same_table(kind, field, pkey, records, resource, repo, opts, uuid_fields)
+        batched_same_table(aggregate, pkey, records, context)
 
       [rel_name] ->
-        batched_related(aggregate, rel_name, pkey, records, resource, repo, opts, uuid_fields)
+        batched_related(aggregate, rel_name, pkey, records, context)
 
       _ ->
         # Multi-hop relationship aggregates are not supported; fall back to each
@@ -150,108 +208,128 @@ defmodule AshClickhouse.DataLayer.Aggregate do
 
   # Aggregating a field on the same row as the record itself — batch as a single
   # SELECT ... WHERE pk IN (...), keyed by pk.
-  defp batched_same_table(kind, field, pkey, records, resource, repo, opts, uuid_fields) do
+  defp batched_same_table(aggregate, pkey, records, context) do
+    %{kind: kind, field: field} = aggregate
+    %{resource: resource} = context
+
     if length(pkey) != 1 do
       %{}
     else
       [pk_col] = pkey
       pk_values = Enum.map(records, &Map.get(&1, pk_col)) |> Enum.uniq()
-      table = DataLayer.qualified_table(resource)
-      cql_field = cql_field(kind, field, resource)
 
-      {in_clause, in_params} = build_in_clause(pk_col, pk_values, uuid_fields)
-
-      query =
-        "SELECT #{Identifier.quote_name(pk_col)}, #{cql_field} FROM #{table} WHERE #{in_clause}"
-
-      case repo.query(query, in_params, opts) do
-        {:ok, %ClickHouse.Result{rows: rows}} ->
-          Map.new(rows, fn [pk, value] ->
-            {normalize_key(pk, pk_col, uuid_fields),
-             decode_aggregate(value, kind, field, resource)}
-          end)
-
-        {:error, reason} ->
-          warn_failed(aggregate_display(kind, field), resource, reason)
-          %{}
-      end
+      run_grouped_aggregate(aggregate, context, %{
+        table: DataLayer.qualified_table(resource),
+        related: resource,
+        key_col: pk_col,
+        fk_attr: pk_col,
+        source_values: pk_values,
+        kind: kind,
+        field: field,
+        pkey: pkey,
+        records: records
+      })
     end
   end
 
   # Aggregating a field on a related table (has_many/has_one/belongs_to) — batch
   # as a single SELECT ... GROUP BY fk, keyed by the *source* record's join
   # column value.
-  defp batched_related(aggregate, rel_name, pkey, records, resource, repo, opts, uuid_fields) do
-    %{kind: kind, field: field, default_value: default_value} = aggregate
+  defp batched_related(aggregate, rel_name, pkey, records, context) do
+    %{kind: kind, field: field} = aggregate
+    %{resource: resource} = context
+
     relationship = Info.relationship(resource, rel_name)
     related = Info.related(resource, [rel_name])
-    related_table = DataLayer.qualified_table(related)
 
     case relationship.type do
       :belongs_to ->
-        fk_values = Enum.map(records, &Map.get(&1, relationship.source_attribute)) |> Enum.uniq()
-
         case pk(Info.primary_key(related)) do
           nil ->
             %{}
 
           dest_pk ->
-            cql_field = cql_field(kind, field, related)
-            {in_clause, in_params} = build_in_clause(dest_pk, fk_values, uuid_fields)
+            source_values =
+              Enum.map(records, &Map.get(&1, relationship.source_attribute)) |> Enum.uniq()
 
-            query =
-              "SELECT #{Identifier.quote_name(dest_pk)}, #{cql_field} FROM #{related_table} WHERE #{in_clause}"
-
-            context = %{
+            run_grouped_aggregate(aggregate, context, %{
+              table: DataLayer.qualified_table(related),
+              related: related,
+              key_col: dest_pk,
+              fk_attr: relationship.source_attribute,
+              source_values: source_values,
               kind: kind,
               field: field,
-              related: related,
-              fk_attr: relationship.source_attribute,
-              key_col: dest_pk,
-              default_value: default_value,
               pkey: pkey,
-              records: records,
-              uuid_fields: uuid_fields
-            }
-
-            handle_batched(repo, opts, query, in_params, context)
+              records: records
+            })
         end
 
       type when type in [:has_many, :has_one] ->
-        dest_fk = relationship.destination_attribute
-
         source_values =
           Enum.map(records, &Map.get(&1, relationship.source_attribute)) |> Enum.uniq()
 
-        cql_field = cql_field(kind, field, related)
-        {in_clause, in_params} = build_in_clause(dest_fk, source_values, uuid_fields)
-
-        query =
-          "SELECT #{Identifier.quote_name(dest_fk)}, #{cql_field} FROM #{related_table} " <>
-            "WHERE #{in_clause} GROUP BY #{Identifier.quote_name(dest_fk)}"
-
-        context = %{
+        run_grouped_aggregate(aggregate, context, %{
+          table: DataLayer.qualified_table(related),
+          related: related,
+          key_col: relationship.destination_attribute,
+          fk_attr: relationship.source_attribute,
+          source_values: source_values,
           kind: kind,
           field: field,
-          related: related,
-          fk_attr: relationship.source_attribute,
-          key_col: dest_fk,
-          default_value: default_value,
           pkey: pkey,
-          records: records,
-          uuid_fields: uuid_fields
-        }
-
-        handle_batched(repo, opts, query, in_params, context)
+          records: records
+        })
 
       _ ->
         %{}
     end
   end
 
+  # Runs the grouped aggregate query over a table, keyed by the column the
+  # group belongs to, and folds the rows into the map the caller merges into
+  # the records.
+  defp run_grouped_aggregate(aggregate, context, params) do
+    %{
+      table: table,
+      related: related,
+      key_col: key_col,
+      fk_attr: fk_attr,
+      source_values: source_values,
+      kind: kind,
+      field: field,
+      pkey: pkey,
+      records: records
+    } = params
+
+    %{resource: resource, uuid_fields: uuid_fields} = context
+
+    cql_field = cql_field(kind, field, related, aggregate)
+
+    {in_clause, in_params} = build_in_clause(key_col, source_values, uuid_fields)
+
+    {where_clause, where_params} =
+      merge_aggregate_filters(aggregate, resource, related, in_clause, in_params)
+
+    query =
+      "SELECT #{Identifier.quote_name(key_col)}, #{cql_field} FROM #{table} " <>
+        "WHERE #{where_clause} GROUP BY #{Identifier.quote_name(key_col)}"
+
+    handle_batched(query, where_params, context, %{
+      kind: kind,
+      field: field,
+      related: related,
+      fk_attr: fk_attr,
+      key_col: key_col,
+      default_value: default_value(aggregate),
+      pkey: pkey,
+      records: records
+    })
+  end
+
   # Runs a batched aggregate SELECT and folds the rows into a map keyed by the
   # source record's `pkey` lookup key. Returns `%{}` when the query fails.
-  defp handle_batched(repo, opts, query, params, %{
+  defp handle_batched(query, params, %{repo: repo, opts: opts, uuid_fields: uuid_fields}, %{
          kind: kind,
          field: field,
          related: related,
@@ -259,8 +337,7 @@ defmodule AshClickhouse.DataLayer.Aggregate do
          key_col: key_col,
          default_value: default_value,
          pkey: pkey,
-         records: records,
-         uuid_fields: uuid_fields
+         records: records
        }) do
     case repo.query(query, params, opts) do
       {:ok, %ClickHouse.Result{rows: rows}} ->
@@ -304,30 +381,223 @@ defmodule AshClickhouse.DataLayer.Aggregate do
   defp pk([single]), do: single
   defp pk(_), do: nil
 
-  defp cql_field(:count, nil, _resource), do: "COUNT(*)"
+  # --- aggregate expressions ---------------------------------------------------
 
-  defp cql_field(kind, field, resource),
-    do: "#{String.upcase(to_string(kind))}(#{resolve_aggregate_field(field, resource)})"
+  # The SQL expression that computes the aggregate over a group of rows.
+  @spec cql_field(atom(), term(), module(), map()) :: String.t()
+  defp cql_field(:count, nil, _resource, _aggregate), do: "COUNT(*)"
+
+  defp cql_field(:count, field, resource, _aggregate) do
+    "COUNT(#{resolve_aggregate_field(field, resource)})"
+  end
+
+  defp cql_field(kind, field, resource, _aggregate)
+       when kind in [:sum, :avg, :min, :max] do
+    "#{String.upcase(to_string(kind))}(#{resolve_aggregate_field(field, resource)})"
+  end
+
+  defp cql_field(:first, field, resource, aggregate) do
+    cql_field = resolve_aggregate_field(field, resource)
+
+    case aggregate_sort(aggregate) do
+      [] ->
+        "any(#{cql_field})"
+
+      [{column, :desc}] ->
+        "argMax(#{cql_field}, #{Identifier.quote_name(column)})"
+
+      [{column, _direction}] ->
+        "argMin(#{cql_field}, #{Identifier.quote_name(column)})"
+
+      columns ->
+        keys = Enum.map_join(columns, ", ", fn {column, _} -> Identifier.quote_name(column) end)
+        "argMin(#{cql_field}, (#{keys}))"
+    end
+  end
+
+  defp cql_field(:list, field, resource, aggregate) do
+    cql_field = resolve_aggregate_field(field, resource)
+
+    case aggregate_sort(aggregate) do
+      [] ->
+        "groupArray(#{cql_field})"
+
+      columns ->
+        keys = Enum.map(columns, fn {column, _} -> Identifier.quote_name(column) end)
+        tuple = Enum.join(keys ++ [cql_field], ", ")
+        lambda = "x -> (#{Enum.map_join(1..length(keys), ", ", &"x.#{&1}")})"
+        sorted = "arraySort(#{lambda}, groupArray((#{tuple})))"
+
+        if Enum.any?(columns, &match?({_column, :desc}, &1)) do
+          "arrayReverse(#{sorted})"
+        else
+          sorted
+        end
+    end
+  end
+
+  defp cql_field(:exists, _field, _resource, _aggregate), do: "COUNT(*) > 0"
+
+  # Any other kind is rendered as a same-named ClickHouse aggregate function;
+  # the value is reported as the database returned it.
+  defp cql_field(kind, field, resource, _aggregate) do
+    "#{String.upcase(to_string(kind))}(#{resolve_aggregate_field(field, resource)})"
+  end
 
   # --- aggregate SELECTs -----------------------------------------------------
 
-  defp build_aggregate_query(%{kind: :count, field: nil}, table, where_clause) do
-    {IO.iodata_to_binary(["SELECT COUNT(*) FROM ", table, where_clause]), []}
+  defp build_aggregate_query(aggregate, table, where_clause, where_params, resource) do
+    kind = Map.get(aggregate, :kind)
+    field = Map.get(aggregate, :field)
+    related = aggregate_resource(aggregate, resource)
+
+    {where_clause, params} =
+      merge_aggregate_filters(aggregate, resource, related, where_clause, where_params)
+
+    cql_field = resolve_aggregate_field(field, related)
+    order_clause = QueryBuilder.order_clause(aggregate_sort(aggregate))
+
+    case kind do
+      :count when is_nil(field) ->
+        {"SELECT COUNT(*) FROM #{table}#{where_clause}", params}
+
+      :count ->
+        {"SELECT COUNT(#{cql_field}) FROM #{table}#{where_clause}", params}
+
+      kind when kind in [:sum, :avg, :min, :max] ->
+        {"SELECT #{String.upcase(to_string(kind))}(#{cql_field}) FROM #{table}#{where_clause}",
+         params}
+
+      :first ->
+        {"SELECT #{cql_field} FROM #{table}#{where_clause}#{order_clause} LIMIT 1", params}
+
+      :list ->
+        {"SELECT #{cql_field} FROM #{table}#{where_clause}#{order_clause}", params}
+
+      :exists ->
+        {"SELECT 1 FROM #{table}#{where_clause} LIMIT 1", params}
+
+      kind ->
+        {:error, "Aggregate kind #{kind} is not supported by ClickHouse data layer"}
+    end
   end
 
-  defp build_aggregate_query(%{kind: :count} = aggregate, table, where_clause) do
-    field = resolve_aggregate_field(aggregate.field, aggregate.resource)
-    {"SELECT COUNT(#{field}) FROM #{table}#{where_clause}", []}
+  # The resource an aggregate is computed over: the aggregated resource for a
+  # relationship aggregate, the queried resource otherwise.
+  @spec aggregate_resource(map(), module()) :: module()
+  defp aggregate_resource(%{related?: false, resource: resource}, _source)
+       when not is_nil(resource),
+       do: resource
+
+  defp aggregate_resource(aggregate, source) do
+    case Map.get(aggregate, :relationship_path) do
+      [] ->
+        source
+
+      path ->
+        Info.related(source, path) || source
+    end
   end
 
-  defp build_aggregate_query(%{kind: kind, field: field} = aggregate, table, where_clause)
-       when kind in [:sum, :avg, :min, :max] do
-    cql_field = resolve_aggregate_field(field, aggregate.resource)
-    {"SELECT #{String.upcase(to_string(kind))}(#{cql_field}) FROM #{table}#{where_clause}", []}
+  # The aggregate's own filter and join filters, translated against the
+  # resource the aggregate is computed over and combined with the query's own
+  # WHERE clause.
+  @spec merge_aggregate_filters(map(), module(), module(), String.t(), list()) ::
+          {String.t(), list()}
+  defp merge_aggregate_filters(aggregate, source, related, where_clause, where_params) do
+    Enum.reduce(
+      aggregate_filter_clauses(aggregate, source, related),
+      {where_clause, where_params},
+      fn clause, {where_clause, params} ->
+        QueryBuilder.merge_where_clauses({where_clause, params}, clause)
+      end
+    )
   end
 
-  defp build_aggregate_query(%{kind: kind}, _table, _where_clause) do
-    {:error, "Aggregate kind #{kind} is not supported by ClickHouse data layer"}
+  @spec aggregate_filter_clauses(map(), module(), module()) :: [{String.t(), list()}]
+  defp aggregate_filter_clauses(aggregate, source, related) do
+    own = aggregate_filter(aggregate, related)
+    joins = join_filter_clauses(aggregate, source, related)
+
+    case own do
+      nil -> joins
+      clause -> [clause | joins]
+    end
+  end
+
+  # The aggregate's own filter, translated against the aggregated resource.
+  #
+  # An aggregate with no filter of its own carries the expression `true` — a
+  # filter that matches every row — so there is nothing to express.
+  @spec aggregate_filter(map(), module()) :: {String.t(), list()} | nil
+  defp aggregate_filter(aggregate, related) do
+    case aggregate_query(aggregate) do
+      %Ash.Query{filter: %Ash.Filter{expression: expression}}
+      when not is_nil(expression) and expression != true ->
+        QueryBuilder.build_where_clause([expression], related)
+
+      _ ->
+        nil
+    end
+  end
+
+  # The aggregate's join filters, each translated against the resource its
+  # relationship path reaches.
+  @spec join_filter_clauses(map(), module(), module()) :: [{String.t(), list()}]
+  defp join_filter_clauses(aggregate, source, related) do
+    aggregate
+    |> Map.get(:join_filters)
+    |> case do
+      filters when is_map(filters) ->
+        Enum.map(filters, fn {path, filter} ->
+          resource = join_filter_resource(source, path, related)
+          translate_filter(filter, resource)
+        end)
+
+      _ ->
+        []
+    end
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp join_filter_resource(source, path, related) do
+    case List.wrap(path) do
+      [] -> related
+      path -> Info.related(source, path) || related
+    end
+  end
+
+  @spec translate_filter(term(), module()) :: {String.t(), list()} | nil
+  defp translate_filter(%Ash.Filter{expression: expression}, resource)
+       when not is_nil(expression) do
+    QueryBuilder.build_where_clause([expression], resource)
+  end
+
+  defp translate_filter(_filter, _resource), do: nil
+
+  # The aggregate's own query, which carries its filter and sort.
+  @spec aggregate_query(map()) :: Ash.Query.t() | nil
+  defp aggregate_query(aggregate) do
+    case Map.get(aggregate, :query) do
+      %Ash.Query{} = query -> query
+      _ -> nil
+    end
+  end
+
+  # The aggregate's own sort, as a list of `{field, direction}` pairs.
+  @spec aggregate_sort(map()) :: [{atom(), atom()}]
+  defp aggregate_sort(aggregate) do
+    case aggregate_query(aggregate) do
+      %Ash.Query{sort: sort} when is_list(sort) ->
+        Enum.flat_map(sort, fn
+          {field, direction} when is_atom(field) -> [{field, direction}]
+          field when is_atom(field) -> [{field, :asc}]
+          _other -> []
+        end)
+
+      _ ->
+        []
+    end
   end
 
   defp resolve_aggregate_field(nil, _resource), do: "*"

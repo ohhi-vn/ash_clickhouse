@@ -31,6 +31,8 @@ defmodule AshClickhouse.DataLayer do
   - `:select` — column projection
   - `:sort` — `ORDER BY`
   - `:distinct` — `SELECT DISTINCT`
+  - `:distinct_sort` — `LIMIT 1 BY`
+  - `:timeout` — ClickHouse's `max_execution_time` setting
   - `:multitenancy` — database- or attribute-based
   - `:bulk_create` — batch `INSERT`
   - `:update_query` / `:destroy_query` — `ALTER TABLE ... UPDATE/DELETE`
@@ -38,12 +40,18 @@ defmodule AshClickhouse.DataLayer do
   - `:composite_primary_key`
   - `:nested_expressions` / `:boolean_filter`
   - `:async_engine`
-  - `:expression_calculation`
-  - `{:aggregate, :count | :sum | :avg | :min | :max}` — native aggregates
-  - `{:query_aggregate, :count | :sum | :avg | :min | :max}`
-  - Combination queries (UNION/INTERSECT) — executed by Ash in memory
+  - `:expression_calculation` / `:expression_calculation_sort`
+  - `{:aggregate, :count | :sum | :avg | :min | :max | :first | :list | :exists}` — native aggregates
+  - `{:query_aggregate, :count | :sum | :avg | :min | :max | :first | :list | :exists}`
+  - Combination queries — run as a single `UNION` statement
 
-  ## Relationship aggregates
+  ## Relationship filters and aggregates
+
+  A filter that references an attribute of a related resource is answered with
+  a **semi-join** — the queried resource's key is tested against a subquery
+  over the related table — so the number of returned rows does not depend on
+  how many related rows match. Only single-hop relationship paths are
+  supported.
 
   `attach_aggregates/5` supports `{:aggregate, :count | :sum | :avg | :min | :max}`
   over `belongs_to`, `has_many`, and `has_one` relationships. A `belongs_to`
@@ -60,19 +68,20 @@ defmodule AshClickhouse.DataLayer do
   - `:lock` — locking is a no-op
   - `:keyset` — ClickHouse has no token-based keyset pagination
   - `:upsert` — ClickHouse has no `ON CONFLICT` (use `:create` + `:update_query`)
-  - `:expression_calculation_sort` — not supported
-  - `:aggregate_filter` / `:aggregate_sort` — not supported
+  - `:aggregate_filter` / `:aggregate_sort` — the per-aggregate `filter:` and
+    `sort:` options are applied instead
   - `:update_many` — use `:update_query`
   - `:composite_type` / `:through_relationship`
-  - `:join` — JOINs are not yet implemented
-  - `:filter_relationship` / `{:exists, :unrelated}` / `{:aggregate_relationship, _}`
-  - `{:query_aggregate, :list | :first | :exists | :custom}` — only count/sum/avg/min/max
+  - `:join` — a full join is not implemented; relationship filters are answered
+    with a semi-join instead
+  - `{:combine, :except | :intersect}` — only the union kinds are supported
   """
 
   @behaviour Ash.DataLayer
 
   require Logger
 
+  alias Ash.Actions.Helpers.Bulk
   alias Ash.Resource.Info
   alias AshClickhouse.DataLayer.Aggregate
   alias AshClickhouse.DataLayer.Calculations
@@ -81,6 +90,7 @@ defmodule AshClickhouse.DataLayer do
   alias AshClickhouse.DataLayer.QueryBuilder
   alias AshClickhouse.DataLayer.Record
   alias AshClickhouse.Error
+  alias AshClickhouse.Functions.Match
   alias AshClickhouse.Identifier
   alias AshClickhouse.Query
   alias AshClickhouse.Telemetry
@@ -112,7 +122,10 @@ defmodule AshClickhouse.DataLayer do
                         :async_engine,
                         :changeset_filter,
                         :action_select,
-                        :expression_calculation
+                        :expression_calculation,
+                        :expression_calculation_sort,
+                        :distinct_sort,
+                        :timeout
                       ])
 
   @type t :: Query.t()
@@ -122,19 +135,57 @@ defmodule AshClickhouse.DataLayer do
   # ============================================================================
 
   @impl Ash.DataLayer
-  def can?(_resource_or_dsl, {:combine, _}), do: false
-  def can?(_resource_or_dsl, {:join, _}), do: false
-  def can?(_resource_or_dsl, {:filter_relationship, _}), do: false
-  def can?(_resource_or_dsl, {:exists, :unrelated}), do: false
-  def can?(_resource_or_dsl, {:aggregate_relationship, _}), do: false
+  # A combination query is run as a single statement against the database: the
+  # parts are combined with ClickHouse's `UNION` operators.
+  def can?(_resource_or_dsl, :combine), do: true
 
-  def can?(_resource_or_dsl, {:aggregate, kind}) when kind in [:count, :sum, :avg, :min, :max],
+  def can?(_resource_or_dsl, {:combine, type}) when type in [:base, :union, :union_all],
     do: true
+
+  def can?(_resource_or_dsl, {:combine, _type}), do: false
+
+  # A filter that reaches into a related resource is answered with a
+  # semi-join — the queried resource's key is tested against a subquery over
+  # the related table — so the filter stays in the query instead of being split
+  # into a separate query for the related resource.
+  #
+  # Only a resource handled by the same data layer can be reached this way:
+  # the semi-join reads the related resource's table directly.
+  def can?(_resource_or_dsl, {:join, resource}) when is_atom(resource) do
+    data_layer_of(resource) == AshClickhouse.DataLayer
+  end
+
+  def can?(_resource_or_dsl, {:join, _resource}), do: false
+
+  # A filter across a relationship is answered with a semi-join, so the number
+  # of returned rows does not depend on how many related rows match.
+  def can?(_resource_or_dsl, {:filter_relationship, relationship}) when is_atom(relationship),
+    do: true
+
+  # A relationship path with more than one hop cannot be expressed as a
+  # semi-join, so it is reported as unsupported.
+  def can?(_resource_or_dsl, {:filter_relationship, path}) when is_list(path),
+    do: length(path) <= 1
+
+  def can?(_resource_or_dsl, {:filter_relationship, _relationship}),
+    do: true
+
+  # An existence check over an unrelated resource is answered with
+  # `EXISTS (SELECT 1 ...)`.
+  def can?(_resource_or_dsl, {:exists, :unrelated}), do: true
+
+  # An aggregate over a relationship is computed with one grouped query for the
+  # whole result set, so a resource declaring one compiles.
+  def can?(_resource_or_dsl, {:aggregate_relationship, _}), do: true
+
+  def can?(_resource_or_dsl, {:aggregate, kind})
+      when kind in [:count, :sum, :avg, :min, :max, :first, :list, :exists],
+      do: true
 
   def can?(_resource_or_dsl, {:aggregate, _}), do: false
 
   def can?(_resource_or_dsl, {:query_aggregate, kind})
-      when kind in [:count, :sum, :avg, :min, :max],
+      when kind in [:count, :sum, :avg, :min, :max, :first, :list, :exists],
       do: true
 
   def can?(_resource_or_dsl, {:query_aggregate, _}), do: false
@@ -145,7 +196,13 @@ defmodule AshClickhouse.DataLayer do
   # All other supported *atom* features resolve via the `@supported_features`
   # MapSet fallback below — keeping a single source of truth avoids the two
   # drifting apart.
-  def can?(_resource_or_dsl, {:filter_expr, _}), do: true
+  #
+  # `{:filter_expr, expr}` is answered precisely: the layer reports support
+  # only for the expressions the query builder can actually translate, so an
+  # unsupported filter is refused when the query is built rather than failing
+  # later with an opaque `QueryError`. The predicate table is shared with the
+  # translator, so the two cannot drift apart.
+  def can?(_resource_or_dsl, {:filter_expr, expr}), do: QueryBuilder.supported_expression?(expr)
   def can?(_resource_or_dsl, {:sort, _}), do: true
 
   # Explicitly-unsupported features that are *not* members of `@supported_features`.
@@ -157,7 +214,6 @@ defmodule AshClickhouse.DataLayer do
   def can?(_resource_or_dsl, :keyset), do: false
   def can?(_resource_or_dsl, :upsert), do: false
   def can?(_resource_or_dsl, {:atomic, _}), do: false
-  def can?(_resource_or_dsl, :expression_calculation_sort), do: false
   def can?(_resource_or_dsl, :aggregate_filter), do: false
   def can?(_resource_or_dsl, :aggregate_sort), do: false
   def can?(_resource_or_dsl, :update_many), do: false
@@ -174,6 +230,16 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec data_layer_keyset_by_default?() :: boolean()
   def data_layer_keyset_by_default?, do: false
+
+  @doc """
+  The ClickHouse-specific functions the layer makes available in filters.
+
+  A published function can be used in any filter; it is translated into its
+  ClickHouse equivalent by the query builder.
+  """
+  @impl Ash.DataLayer
+  @spec functions(Ash.Resource.t()) :: [module()]
+  def functions(_resource), do: [Match]
 
   @impl Ash.DataLayer
   @spec return_query(t(), Ash.Resource.t()) :: {:ok, t()}
@@ -224,10 +290,10 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec run_query(t(), Ash.Resource.t()) :: {:ok, [Ash.Resource.t()]} | {:error, term()}
   def run_query(data_layer_query, resource) do
-    %Query{repo: repo} = data_layer_query
+    %Query{repo: repo, context: context} = data_layer_query
     repo = if is_nil(repo), do: repo(resource), else: repo
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
-    opts = []
+    opts = build_opts(resource, context)
 
     # NOTE: debug logging includes the full SQL and bound parameters, which may
     # contain row data. Do not enable `:debug` for this module in production
@@ -242,7 +308,9 @@ defmodule AshClickhouse.DataLayer do
 
             records =
               rows
-              |> Enum.map(&Record.to_ash_record(&1, resource, columns))
+              |> Enum.map(
+                &Record.to_ash_record(&1, resource, columns, query_calculations(data_layer_query))
+              )
 
             {:ok, records}
 
@@ -256,9 +324,8 @@ defmodule AshClickhouse.DataLayer do
 
     case result do
       {:ok, records} ->
-        %Query{context: context} = data_layer_query
-        aggregates = Map.get(context, :aggregates, [])
-        records = Calculations.apply_calculations(records, context)
+        %Query{aggregates: aggregates} = data_layer_query
+        records = Calculations.apply_calculations(records, data_layer_query, resource)
         records = Aggregate.attach(records, aggregates, resource, repo, opts)
         {:ok, records}
 
@@ -289,7 +356,7 @@ defmodule AshClickhouse.DataLayer do
     %Query{repo: repo, context: context} = data_layer_query
 
     {query, params} = QueryBuilder.build_optimized_query(data_layer_query)
-    opts = opts
+    opts = build_opts(resource, context) ++ opts
 
     repo = if is_nil(repo), do: repo(resource), else: repo
 
@@ -311,7 +378,7 @@ defmodule AshClickhouse.DataLayer do
         if database, do: [{:database, database} | opts], else: opts
       end
 
-    aggregates = Map.get(context, :aggregates, [])
+    aggregates = data_layer_query.aggregates
 
     # JSONCompactEachRow stream chunks carry no column names, so we must derive
     # the expected column order from the query itself. When `select`/`distinct`
@@ -320,6 +387,7 @@ defmodule AshClickhouse.DataLayer do
     # attribute declaration order (which matches tables created via this data
     # layer's migrations).
     columns = query_columns(data_layer_query)
+    calculations = query_calculations(data_layer_query)
 
     try do
       stream = ClickHouse.stream!(repo, query, params, opts)
@@ -333,8 +401,8 @@ defmodule AshClickhouse.DataLayer do
         {_columns, rows} = Format.JSONCompactEachRow.decode(chunk)
 
         rows
-        |> Enum.map(&Record.to_ash_record(&1, resource, columns))
-        |> Calculations.apply_calculations(context)
+        |> Enum.map(&Record.to_ash_record(&1, resource, columns, calculations))
+        |> Calculations.apply_calculations(data_layer_query, resource)
         |> Aggregate.attach(aggregates, resource, repo, opts)
       end)
     rescue
@@ -352,10 +420,18 @@ defmodule AshClickhouse.DataLayer do
   # ============================================================================
 
   @impl Ash.DataLayer
-  @spec filter(t(), term(), Ash.Resource.t()) :: {:ok, t()}
+  @spec filter(t(), term(), Ash.Resource.t()) :: {:ok, t()} | {:error, term()}
   def filter(data_layer_query, %Ash.Filter{expression: expression}, _resource) do
-    %Query{filters: filters} = data_layer_query
-    {:ok, %{data_layer_query | filters: [expression | filters]}}
+    case QueryBuilder.relationship_path_depth(expression) do
+      depth when depth > 1 ->
+        {:error,
+         "AshClickhouse: cannot filter across a relationship path of #{depth} hops. " <>
+           "Only single-hop relationship filters are supported."}
+
+      _depth ->
+        %Query{filters: filters} = data_layer_query
+        {:ok, %{data_layer_query | filters: [expression | filters]}}
+    end
   end
 
   def filter(data_layer_query, filter, _resource) do
@@ -365,10 +441,38 @@ defmodule AshClickhouse.DataLayer do
 
   @impl Ash.DataLayer
   @spec sort(t(), term(), Ash.Resource.t()) :: {:ok, t()}
-  def sort(data_layer_query, sort, _resource) do
+  def sort(data_layer_query, sort, resource) do
     %Query{sorts: sorts} = data_layer_query
-    {:ok, %{data_layer_query | sorts: sort ++ sorts}}
+
+    {sort, data_layer_query} =
+      Enum.reduce(List.wrap(sort), {[], data_layer_query}, fn entry, {acc, query} ->
+        case sort_entry(entry, query, resource) do
+          {:ok, new_entry, query} -> {[new_entry | acc], query}
+          :error -> {[entry | acc], query}
+        end
+      end)
+
+    {:ok, %{data_layer_query | sorts: Enum.reverse(sort) ++ sorts}}
   end
+
+  # A sort entry that references an expression calculation is projected into
+  # the select list and ordered by its alias, rather than being handed to
+  # `Identifier.quote_name/1` — which cannot render a calculation struct.
+  defp sort_entry({%Ash.Query.Calculation{} = calculation, direction}, query, resource) do
+    case push_down_calculation(query, calculation, resource) do
+      {:ok, query} -> {:ok, {calculation.name, direction}, query}
+      :error -> :error
+    end
+  end
+
+  defp sort_entry(%Ash.Query.Calculation{} = calculation, query, resource) do
+    case push_down_calculation(query, calculation, resource) do
+      {:ok, query} -> {:ok, calculation.name, query}
+      :error -> :error
+    end
+  end
+
+  defp sort_entry(_entry, _query, _resource), do: :error
 
   @impl Ash.DataLayer
   @spec limit(t(), pos_integer(), Ash.Resource.t()) :: {:ok, t()}
@@ -422,8 +526,22 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec set_context(Ash.Resource.t(), t(), map()) :: {:ok, t()}
   def set_context(_resource, data_layer_query, context) do
-    %Query{context: existing} = data_layer_query
-    {:ok, %{data_layer_query | context: Map.merge(existing || %{}, context)}}
+    %Query{context: existing, combination: combination} = data_layer_query
+
+    # Ash threads the previous combination's accumulator into the next part's
+    # context, so the parts can be appended to the ones before them.
+    combination =
+      case get_in(context, [:data_layer, :previous_combination]) do
+        previous when is_list(previous) -> previous
+        _other -> combination
+      end
+
+    {:ok,
+     %{
+       data_layer_query
+       | context: Map.merge(existing || %{}, context),
+         combination: combination
+     }}
   end
 
   @impl Ash.DataLayer
@@ -449,6 +567,9 @@ defmodule AshClickhouse.DataLayer do
   end
 
   @impl Ash.DataLayer
+  def default_bulk_batch_size(_resource, _action), do: @default_batch_size
+
+  @impl Ash.DataLayer
   @spec bulk_create(Ash.Resource.t(), Enumerable.t(Ash.Changeset.t()), map()) ::
           :ok | {:ok, Enumerable.t(Ash.Resource.t())} | {:error, term()}
   def bulk_create(resource, changesets, opts) do
@@ -463,12 +584,17 @@ defmodule AshClickhouse.DataLayer do
 
     return_records? = Keyword.get(opts, :return_records?, true)
 
+    changesets = Enum.to_list(changesets)
+
+    # The attribute maps are computed once and used for both the wire row and
+    # the returned record: `changeset_to_insert_attrs/2` generates the
+    # autogenerated primary key, so computing it twice would give the row
+    # stored in ClickHouse and the record handed back different ids.
+    attrs_list = Enum.map(changesets, &Insert.changeset_to_insert_attrs(&1, resource))
+
     {fields, rows} =
-      changesets
-      |> Enum.map(fn changeset ->
-        attrs = Insert.changeset_to_insert_attrs(changeset, resource)
-        Insert.attrs_to_row(attrs, resource)
-      end)
+      attrs_list
+      |> Enum.map(&Insert.attrs_to_row(&1, resource))
       |> Insert.build_insert_rows(resource)
 
     insert_opts = Insert.insert_opts(resource, opts)
@@ -486,7 +612,7 @@ defmodule AshClickhouse.DataLayer do
       end)
 
     case result do
-      :ok when return_records? -> {:ok, stream_bulk_records(rows, resource)}
+      :ok when return_records? -> {:ok, stream_bulk_records(changesets, attrs_list, resource)}
       :ok -> {:ok, []}
       {:error, error} -> handle_result({:error, error})
     end
@@ -553,26 +679,285 @@ defmodule AshClickhouse.DataLayer do
   @spec distinct(t(), list(atom()), Ash.Resource.t()) :: {:ok, t()} | {:error, term()}
   def distinct(data_layer_query, distinct_columns, _resource) do
     %Query{select: existing} = data_layer_query
-    select = ((existing || []) ++ distinct_columns) |> Enum.uniq()
+    names = distinct_column_names(distinct_columns)
+    select = ((existing || []) ++ names) |> Enum.uniq()
     {:ok, %{data_layer_query | distinct: distinct_columns, select: select}}
+  end
+
+  # The distinct columns Ash supplies are `{field, direction}` pairs.
+  @spec distinct_column_names(list()) :: [atom()]
+  defp distinct_column_names(distinct_columns) do
+    Enum.map(distinct_columns, fn
+      {field, _direction} -> field
+      field -> field
+    end)
+  end
+
+  @impl Ash.DataLayer
+  @spec distinct_sort(t(), list(), Ash.Resource.t()) :: {:ok, t()}
+  def distinct_sort(data_layer_query, sort, _resource) do
+    %Query{distinct_sort: distinct_sort} = data_layer_query
+    {:ok, %{data_layer_query | distinct_sort: distinct_sort ++ List.wrap(sort)}}
   end
 
   @impl Ash.DataLayer
   @spec lock(t(), term(), Ash.Resource.t()) :: {:ok, t()}
   def lock(data_layer_query, _lock_type, _resource), do: {:ok, data_layer_query}
 
-  # Combination queries (UNION/INTERSECT) are executed by Ash as separate
-  # queries and combined in memory, so Ash never invokes this callback for the
-  # ClickHouse data layer. `can?/2` reports `{:combine, _}` as unsupported.
-  # This clause is defensive/unreachable and exists only to satisfy the
-  # `Ash.DataLayer` behaviour.
+  # A combination query is run as a single statement: the parts' statements
+  # are combined with ClickHouse's `UNION` operators.
+  #
+  # The parts arrive as `{type, data_layer_query}` pairs, one per combination
+  # Ash was given, in the order Ash supplied them.
   @impl Ash.DataLayer
-  @spec combination_of(t(), term(), Ash.Resource.t()) :: {:ok, t()} | {:error, term()}
-  def combination_of(_data_layer_query, _combination, _resource) do
-    {:error,
-     Error.QueryError.from_error(
-       "Combination queries are executed by Ash as separate queries and combined in memory."
-     )}
+  @spec combination_of([{atom(), t()}], Ash.Resource.t(), Ash.Domain.t()) ::
+          {:ok, t()} | {:error, term()}
+  def combination_of(combinations, resource, _domain) do
+    case combinations do
+      [] ->
+        {:error, "Cannot build a combination query without any parts"}
+
+      [{_type, _query} | _rest] ->
+        base = List.last(combinations) |> elem(1)
+
+        # The outer query's own select, filter, sort and limit are applied to
+        # the combined statement, so the part's own are cleared.
+        query = %{
+          base
+          | select: nil,
+            distinct: nil,
+            filters: [],
+            sorts: [],
+            limit: nil,
+            offset: nil,
+            group_by: nil,
+            combination_of: combinations,
+            resource: resource
+        }
+
+        {:ok, query}
+    end
+  end
+
+  # Returns the parts accumulated so far, so that a subsequent part can be
+  # appended to them. The parts are kept in the order Ash supplied them.
+  @impl Ash.DataLayer
+  @spec combination_acc(t()) :: [{String.t(), list()}]
+  def combination_acc(data_layer_query) do
+    {sql, params} = QueryBuilder.build_optimized_query(data_layer_query)
+
+    data_layer_query.combination ++ [{sql, params}]
+  end
+
+  # ============================================================================
+  # Expression calculations
+  # ============================================================================
+
+  @impl Ash.DataLayer
+  @spec add_calculations(t(), [{Ash.Query.Calculation.t(), term()}], Ash.Resource.t()) ::
+          {:ok, t()}
+  def add_calculations(data_layer_query, calculations, resource) do
+    {:ok,
+     Enum.reduce(calculations, data_layer_query, fn {calculation, expression}, query ->
+       {:ok, query} = add_calculation_to_query(query, calculation, expression, resource)
+       query
+     end)}
+  end
+
+  @impl Ash.DataLayer
+  @spec add_calculation(t(), Ash.Query.Calculation.t(), term(), Ash.Resource.t()) :: {:ok, t()}
+  def add_calculation(data_layer_query, calculation, expression, resource) do
+    add_calculation_to_query(data_layer_query, calculation, expression, resource)
+  end
+
+  defp add_calculation_to_query(query, calculation, expression, resource) do
+    case QueryBuilder.build_value_expression(expression) do
+      {sql, params} ->
+        {:ok, put_calculation_expression(query, resource, calculation, sql, params)}
+
+      nil ->
+        # The expression cannot be rendered as SQL, so the calculation is
+        # recorded for evaluation against the decoded record instead.
+        {:ok, record_calculation(query, calculation, expression)}
+    end
+  end
+
+  # Projects a calculation's expression into the select list as an aliased
+  # expression, so the database computes the value.
+  defp put_calculation_expression(query, resource, calculation, sql, params) do
+    name = calculation.name
+
+    %{
+      query
+      | select: select_with_expression(query, resource, name, sql),
+        calculations:
+          replace_calculation(query.calculations, name, %{
+            name: name,
+            type: calculation.type,
+            constraints: calculation.constraints,
+            params: params
+          })
+    }
+  end
+
+  # Replaces the calculation's entry when it is already present (Ash calls the
+  # calculation callbacks more than once for the same calculation) and appends
+  # it otherwise.
+  defp replace_calculation(calculations, name, entry) do
+    if Enum.any?(calculations, &(&1.name == name)) do
+      Enum.map(calculations, fn
+        %{name: ^name} -> entry
+        existing -> existing
+      end)
+    else
+      calculations ++ [entry]
+    end
+  end
+
+  # Adds the expression to the select list. When the query does not select an
+  # explicit column list, every attribute is listed so the expression can be
+  # appended to it.
+  defp select_with_expression(query, resource, name, sql) do
+    select = query.select
+
+    base =
+      if is_list(select) and select != [] do
+        Enum.reject(select, &match?({^name, _sql}, &1))
+      else
+        resource |> Info.attributes() |> Enum.map(& &1.name)
+      end
+
+    base ++ [{name, sql}]
+  end
+
+  # Records a calculation that cannot be pushed down, so it is evaluated
+  # against each decoded record.
+  defp record_calculation(query, calculation, expression) do
+    context = query.context
+    calculations = Map.get(context, :calculations, [])
+
+    entry = %{
+      name: calculation.name,
+      expression: expression,
+      type: calculation.type,
+      constraints: calculation.constraints
+    }
+
+    %{query | context: Map.put(context, :calculations, calculations ++ [entry])}
+  end
+
+  # Rebuilds a calculation's expression from the calculation struct, so a
+  # calculation that is only used for sorting can still be projected into the
+  # select list.
+  defp push_down_calculation(query, %Ash.Query.Calculation{} = calculation, resource) do
+    case calculation_expression(calculation) do
+      nil ->
+        :error
+
+      expression ->
+        case QueryBuilder.build_value_expression(expression) do
+          {sql, params} ->
+            {:ok, put_calculation_expression(query, resource, calculation, sql, params)}
+
+          nil ->
+            :error
+        end
+    end
+  end
+
+  defp calculation_expression(%Ash.Query.Calculation{} = calculation) do
+    if Ash.Resource.Calculation.has_expression?(calculation.module) do
+      context = Map.get(calculation, :context) || %{}
+
+      expression =
+        Ash.Resource.Calculation.expression(
+          calculation.module,
+          calculation.opts,
+          %{
+            actor: Map.get(context, :actor),
+            tenant: Map.get(context, :tenant),
+            arguments: Map.get(context, :arguments) || %{},
+            source_context: Map.get(context, :source_context) || %{},
+            type: calculation.type,
+            constraints: calculation.constraints
+          }
+        )
+
+      case expression do
+        {:ok, expr} -> expr
+        {:error, _reason} -> nil
+        expr -> expr
+      end
+    end
+  rescue
+    _ -> nil
+  end
+
+  @impl Ash.DataLayer
+  @spec calculate(Ash.Resource.t(), list(Ash.Expr.t()), map()) ::
+          {:ok, term()} | {:error, term()}
+  def calculate(resource, exprs, context) do
+    with {:ok, record} <- fetch_calculated_record(resource, context),
+         {:ok, values} <- evaluate_expressions(exprs, record, resource) do
+      {:ok, values}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Fetches the record the one-off calculation is asked about, identified by
+  # the primary key the caller threaded through the context.
+  defp fetch_calculated_record(resource, context) do
+    primary_key = Map.get(context, :primary_key) || %{}
+
+    filters =
+      Enum.map(primary_key, fn {name, value} ->
+        %{op: :eq, name: name, right: %{value: value}}
+      end)
+
+    if filters == [] do
+      {:error, "Cannot calculate without a primary key"}
+    else
+      repo = repo(resource)
+
+      query = %Query{
+        resource: resource,
+        repo: repo,
+        table: source(resource),
+        database: Dsl.database(resource),
+        filters: filters
+      }
+
+      {sql, params} = QueryBuilder.build_optimized_query(query)
+
+      case repo.query(sql, params, build_opts(resource)) do
+        {:ok, %ClickHouse.Result{rows: [row]}} ->
+          {:ok, Record.to_ash_record(row, resource)}
+
+        {:ok, %ClickHouse.Result{rows: []}} ->
+          {:error, "No record found for the given primary key"}
+
+        {:ok, _other} ->
+          {:error, "Unexpected result calculating the expression"}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp evaluate_expressions(exprs, record, resource) do
+    Enum.reduce_while(exprs, {:ok, []}, fn expr, {:ok, values} ->
+      case Ash.Expr.eval_hydrated(expr,
+             record: record,
+             resource: resource,
+             unknown_on_unknown_refs?: true
+           ) do
+        {:ok, value} -> {:cont, {:ok, values ++ [value]}}
+        :unknown -> {:halt, {:error, "Could not evaluate the expression"}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   # ============================================================================
@@ -582,17 +967,32 @@ defmodule AshClickhouse.DataLayer do
   @impl Ash.DataLayer
   @spec add_aggregate(t(), Ash.Query.Aggregate.t(), Ash.Resource.t()) :: {:ok, t()}
   def add_aggregate(data_layer_query, aggregate, _resource) do
-    %Query{context: context} = data_layer_query
-    aggregates = Map.get(context, :aggregates, [])
-    {:ok, %{data_layer_query | context: Map.put(context, :aggregates, [aggregate | aggregates])}}
+    %Query{aggregates: aggregates} = data_layer_query
+    {:ok, %{data_layer_query | aggregates: add_aggregate_entry(aggregates, aggregate)}}
   end
 
   @impl Ash.DataLayer
   @spec add_aggregates(t(), [Ash.Query.Aggregate.t()], Ash.Resource.t()) :: {:ok, t()}
   def add_aggregates(data_layer_query, aggregates, _resource) do
-    %Query{context: context} = data_layer_query
-    existing = Map.get(context, :aggregates, [])
-    {:ok, %{data_layer_query | context: Map.put(context, :aggregates, aggregates ++ existing)}}
+    %Query{aggregates: existing} = data_layer_query
+
+    {:ok,
+     %{
+       data_layer_query
+       | aggregates: Enum.reduce(aggregates, existing, &add_aggregate_entry(&2, &1))
+     }}
+  end
+
+  # Ash calls `add_aggregates/3` twice with the same list, and each aggregate is
+  # computed with its own query, so a duplicate costs a full extra round-trip.
+  # The aggregates are de-duplicated by name at the point they are added.
+  @spec add_aggregate_entry(list(), Ash.Query.Aggregate.t()) :: list()
+  defp add_aggregate_entry(aggregates, aggregate) do
+    if Enum.any?(aggregates, &(&1.name == aggregate.name)) do
+      aggregates
+    else
+      aggregates ++ [aggregate]
+    end
   end
 
   @impl Ash.DataLayer
@@ -608,16 +1008,6 @@ defmodule AshClickhouse.DataLayer do
       {:error, error} -> handle_result({:error, error})
       map when is_map(map) -> {:ok, map}
     end
-  end
-
-  @impl Ash.DataLayer
-  @spec calculate(t(), Ash.Query.Calculation.t(), Ash.Resource.t()) :: {:ok, t()}
-  def calculate(data_layer_query, calculation, _resource) do
-    %Query{context: context} = data_layer_query
-    calculations = Map.get(context, :calculations, [])
-
-    {:ok,
-     %{data_layer_query | context: Map.put(context, :calculations, [calculation | calculations])}}
   end
 
   # ============================================================================
@@ -726,6 +1116,15 @@ defmodule AshClickhouse.DataLayer do
     end
   end
 
+  # `Ash.Resource.Info.data_layer/1` raises for a module that is not an Ash
+  # resource, so the lookup is guarded.
+  @spec data_layer_of(module()) :: module() | nil
+  defp data_layer_of(resource) do
+    Info.data_layer(resource)
+  rescue
+    _ -> nil
+  end
+
   @doc false
   @spec qualified_table(module()) :: String.t()
   def qualified_table(resource) do
@@ -819,8 +1218,27 @@ defmodule AshClickhouse.DataLayer do
   # Record decoding
   # ============================================================================
 
-  defp stream_bulk_records(rows, resource) do
-    Stream.map(rows, &Record.to_ash_record(&1, resource))
+  # Builds the records `bulk_create/3` hands back.
+  #
+  # The record is built from the changeset's submitted attributes, not from the
+  # encoded rows: the encoded rows are the wire form, and reusing them here
+  # would hand the caller that encoding (a datetime as its decimal string, a
+  # date as a day count) instead of the values they submitted.
+  #
+  # Ash matches bulk-created records back to their changesets through the
+  # `bulk_create_index` / `bulk_action_ref` metadata. Without it,
+  # `Ash.Actions.Helpers.Bulk.lookup_changeset` cannot find the changeset and
+  # the create fails with `BadMapError` whenever records are requested
+  # (`return_records?: true`, or `notify?: true` — notifiers read the record).
+  # Mirrors `Ash.DataLayer.Ets.bulk_create/3`.
+  defp stream_bulk_records(changesets, attrs_list, resource) do
+    changesets
+    |> Enum.zip(attrs_list)
+    |> Stream.map(fn {changeset, attrs} ->
+      attrs
+      |> Record.to_ash_record(resource)
+      |> Bulk.put_metadata(changeset)
+    end)
   end
 
   # Derives the expected column order for the streaming decode path from the
@@ -834,6 +1252,15 @@ defmodule AshClickhouse.DataLayer do
 
   defp query_columns(_), do: nil
 
+  # The calculations the data layer pushed down into the select list, keyed by
+  # their name, so the decode path knows which result columns are calculations
+  # rather than attributes.
+  defp query_calculations(%Query{calculations: calculations}) when is_list(calculations) do
+    Map.new(calculations, fn calculation ->
+      {to_string(calculation.name), calculation}
+    end)
+  end
+
   # Options / error handling
   # ============================================================================
 
@@ -846,6 +1273,10 @@ defmodule AshClickhouse.DataLayer do
   # the mutation to complete (1 = current replica, 2 = all replicas) before the
   # subsequent read. This gives callers read-your-writes semantics for
   # update_query/destroy_query when they opt in; the default is async.
+  #
+  # A timeout in the context is forwarded as ClickHouse's `max_execution_time`
+  # setting, in seconds, so the server stops the query rather than letting the
+  # client hang.
   defp build_opts(resource, context, default_sync \\ nil) do
     context = if is_map(context), do: context, else: %{}
 
@@ -855,11 +1286,31 @@ defmodule AshClickhouse.DataLayer do
     sync =
       if from_context != nil, do: from_context, else: Dsl.mutations_sync(resource) || default_sync
 
-    if sync != nil do
-      [settings: %{mutations_sync: sync}]
-    else
+    settings =
+      if sync != nil, do: %{mutations_sync: sync}, else: %{}
+
+    settings =
+      case Map.get(context, :timeout) do
+        timeout when is_integer(timeout) and timeout > 0 ->
+          Map.put(settings, :max_execution_time, max_execution_time_seconds(timeout))
+
+        _other ->
+          settings
+      end
+
+    if map_size(settings) == 0 do
       []
+    else
+      [settings: settings]
     end
+  end
+
+  # ClickHouse's `max_execution_time` is in seconds; Ash's timeout is in
+  # milliseconds. The value is rounded up so the server never stops the query
+  # earlier than the caller asked for.
+  @spec max_execution_time_seconds(pos_integer()) :: pos_integer()
+  defp max_execution_time_seconds(timeout) do
+    div(timeout + 999, 1000)
   end
 
   defp normalize_bulk_options(opts) when is_map(opts), do: Map.to_list(opts)

@@ -4,7 +4,7 @@ defmodule AshClickhouse.MixProject do
   def project do
     [
       app: :ash_clickhouse,
-      version: "0.7.7",
+      version: "0.8.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -117,11 +117,11 @@ defmodule AshClickhouse.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:ash, "~> 3.33"},
+      {:ash, "~> 3.36"},
       {:clickhouse, "~> 0.32"},
       {:telemetry, "~> 1.0"},
-      {:jason, "~> 1.0", optional: true},
-      {:decimal, "~> 3.1", optional: true},
+      {:jason, "~> 1.4", optional: true},
+      {:decimal, "~> 3.2", optional: true},
       {:testcontainer_ex, "== 0.7.2", only: [:test]},
 
       # Dev / docs

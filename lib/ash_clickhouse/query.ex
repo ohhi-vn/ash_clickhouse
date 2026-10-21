@@ -7,6 +7,14 @@ defmodule AshClickhouse.Query do
   `AshClickhouse.DataLayer.QueryBuilder` operate on `%AshClickhouse.Query{}`.
   """
 
+  @typedoc """
+  A select-list entry.
+
+  Either a plain column name, or a `{name, sql}` pair holding an expression
+  that is rendered as `<sql> AS <name>`.
+  """
+  @type select_entry :: atom() | {atom(), String.t()}
+
   @type t :: %__MODULE__{
           resource: Ash.Resource.t(),
           repo: module() | nil,
@@ -16,12 +24,16 @@ defmodule AshClickhouse.Query do
           sorts: list(),
           limit: pos_integer() | nil,
           offset: non_neg_integer() | nil,
-          select: list(atom()) | nil,
+          select: list(select_entry()) | nil,
           distinct: list(atom()) | nil,
           tenant: term(),
           context: map(),
           aggregates: list(map()),
-          group_by: list(atom()) | nil
+          group_by: list(atom()) | nil,
+          calculations: list(map()),
+          combination: list(),
+          combination_of: list(),
+          distinct_sort: list()
         }
 
   defstruct [
@@ -38,7 +50,11 @@ defmodule AshClickhouse.Query do
     aggregates: [],
     group_by: nil,
     filters: [],
-    sorts: []
+    sorts: [],
+    calculations: [],
+    combination: [],
+    combination_of: [],
+    distinct_sort: []
   ]
 
   alias AshClickhouse.DataLayer

@@ -30,8 +30,11 @@ MyApp.User
 ```
 
 Boolean expressions, nested expressions, and `changeset_filter` are supported.
-Relationship filters (`filter_relationship`, unrelated `exists`,
-`aggregate_relationship`) are **not** supported yet.
+Relationship filters are supported for a **single** relationship hop: the
+filter is answered with a semi-join, so the number of returned rows does not
+depend on how many related rows match. An unrelated `exists/2` is answered with
+`EXISTS (SELECT 1 ...)`, and an aggregate over a relationship is computed with
+one grouped query for the whole result set.
 
 ### Untranslatable filters fail closed
 

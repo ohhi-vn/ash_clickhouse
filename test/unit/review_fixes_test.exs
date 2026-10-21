@@ -438,7 +438,6 @@ defmodule AshClickhouse.ReviewFixesTest do
             :keyset,
             :upsert,
             {:atomic, :something},
-            :expression_calculation_sort,
             :aggregate_filter,
             :aggregate_sort,
             :update_many,

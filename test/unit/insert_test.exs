@@ -61,6 +61,12 @@ defmodule AshClickhouse.InsertTest do
     def storage_type(_), do: "DateTime"
   end
 
+  defmodule DateTime64DefaultPrecision do
+    use Ash.Type.NewType, subtype_of: :utc_datetime
+
+    def storage_type(_), do: "DateTime64"
+  end
+
   defmodule PrecisionResource do
     use Ash.Resource, data_layer: AshClickhouse.DataLayer, domain: nil
 
@@ -70,6 +76,7 @@ defmodule AshClickhouse.InsertTest do
       attribute(:us, :utc_datetime)
       attribute(:ns, DateTime64Ns)
       attribute(:plain, PlainSecondDateTime)
+      attribute(:default_precision, DateTime64DefaultPrecision)
     end
   end
 
@@ -198,7 +205,8 @@ defmodule AshClickhouse.InsertTest do
                "1704164645.000000",
                "1704164645.000000",
                "1704164645.000000",
-               1_704_164_645
+               1_704_164_645,
+               nil
              ]
     end
 
@@ -207,7 +215,7 @@ defmodule AshClickhouse.InsertTest do
 
       {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
 
-      assert [nil, nil, value, nil, nil] = encoded
+      assert [nil, nil, value, nil, nil, nil] = encoded
       assert value == "1704164645.123456"
     end
 
@@ -216,7 +224,7 @@ defmodule AshClickhouse.InsertTest do
 
       {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
 
-      assert [nil, nil, value, nil, nil] = encoded
+      assert [nil, nil, value, nil, nil, nil] = encoded
       assert is_binary(value)
       refute is_number(value)
     end
@@ -226,12 +234,29 @@ defmodule AshClickhouse.InsertTest do
 
       {_fields, [encoded]} =
         Insert.build_insert_rows(
-          [%{"ms" => dt, "us" => dt, "ns" => dt}],
+          [%{"ms" => dt, "us" => dt, "ns" => dt, "default_precision" => dt}],
           PrecisionResource
         )
 
-      assert [nil, "1704164645.123456", "1704164645.123456", "1704164645.123456", nil] =
-               encoded
+      assert [
+               nil,
+               "1704164645.123456",
+               "1704164645.123456",
+               "1704164645.123456",
+               nil,
+               "1704164645.123456"
+             ] = encoded
+    end
+
+    test "a DateTime64 column declared without a precision is still a DateTime64 column" do
+      {:ok, dt, _} = DateTime.from_iso8601("2024-01-02T03:04:05.123456Z")
+
+      {_fields, [encoded]} =
+        Insert.build_insert_rows([%{"default_precision" => dt}], PrecisionResource)
+
+      assert [nil, nil, nil, nil, nil, value] = encoded
+      assert value == "1704164645.123456"
+      refute is_number(value)
     end
 
     test "encodes pre-1970 instants as signed decimal Unix seconds" do
@@ -239,7 +264,7 @@ defmodule AshClickhouse.InsertTest do
 
       {_fields, [encoded]} = Insert.build_insert_rows([%{"us" => dt}], PrecisionResource)
 
-      assert [nil, nil, value, nil, nil] = encoded
+      assert [nil, nil, value, nil, nil, nil] = encoded
       assert value == "-0.123456"
     end
 

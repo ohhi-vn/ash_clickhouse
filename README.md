@@ -10,21 +10,30 @@ An [Ash Framework](https://ash-hq.org) data layer for [ClickHouse](https://click
 ClickHouse is a full SQL columnar store, so most Ash query features map directly:
 
 - CRUD (`create`, `read`, `update`, `destroy`)
-- `filter`, `sort`, `limit`, `offset`, `select`, `distinct`
+- `filter`, `sort`, `limit`, `offset`, `select`, `distinct`, `distinct_sort`
+- `timeout` (mapped onto ClickHouse's `max_execution_time` setting)
 - `bulk_create` (batch `INSERT`)
 - `update_query` / `destroy_query` (via `ALTER TABLE ... UPDATE/DELETE`)
-- Native aggregates (`count`, `sum`, `avg`, `min`, `max`)
+- Native aggregates (`count`, `sum`, `avg`, `min`, `max`, `first`, `list`, `exists`)
+- Aggregates over a relationship, computed with one grouped query per aggregate
+- Filters over a relationship, answered with a semi-join
+- Existence checks over an unrelated resource (`EXISTS (SELECT 1 ...)`)
+- Combination queries — run as a single `UNION` statement
 - `multitenancy` (attribute- or context-based)
 - `calculate`, `composite_primary_key`, `nested_expressions`, `boolean_filter`
+- `expression_calculation` / `expression_calculation_sort` — the expression is
+  computed by ClickHouse and reported on the record
+- `functions/1` — the layer publishes the ClickHouse functions usable in filters
+  (`match/2` today)
 
 ### Not supported
 
 - `transact` / `lock` — ClickHouse has no multi-statement transactions
 - `keyset` — ClickHouse has no token-based keyset pagination (use `offset`)
 - `upsert` — ClickHouse has no `ON CONFLICT` (use `create` + `update_query`)
-- `join` — JOINs are not yet implemented
-- `combine` (UNION/INTERSECT) — not yet implemented
-- `filter_relationship` / `exists` (unrelated) / `aggregate_relationship` — not yet implemented
+- `join` — a full join is not implemented; relationship filters use a semi-join
+- `combine` with `except` / `intersect` — only the union kinds are supported
+- a relationship filter across more than one relationship hop
 
 ## Installation
 

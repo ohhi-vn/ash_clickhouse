@@ -389,44 +389,37 @@ defmodule AshClickhouse.DataLayerEdgeTest do
 
   # ── in-memory calculations and aggregates ──────────────────────────────────────
 
-  describe "in-memory calculations (apply_calculations)" do
-    test "a module calculation is attached to each record" do
-      q = DataLayer.resource_to_query(FakeResource, nil)
-      calc = %{name: :age_plus_one, module: AddOneCalc, opts: []}
-      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
-
+  describe "one-off calculations (calculate/3)" do
+    test "an expression is evaluated against the record it belongs to" do
       FakeRepo.set_mode(FakeRepo, :rows)
-      {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
 
-      # `calculate/2` returns a list, so the attached value is `[age + 1]`.
-      assert Map.get(record, :age_plus_one) == [31]
+      expr = %Ash.Query.Ref{attribute: :age, relationship_path: []}
+
+      assert {:ok, [30]} =
+               DataLayer.calculate(FakeResource, [expr], %{primary_key: %{id: "id-1"}})
     end
 
-    test "an unsupported calculation is ignored (record unchanged)" do
-      q = DataLayer.resource_to_query(FakeResource, nil)
-      calc = %{name: :nope, module: nil, opts: []}
-      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
+    test "several expressions return one value per expression, in order" do
+      FakeRepo.set_mode(FakeRepo, :rows)
 
-      {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
-      refute Map.has_key?(record, :nope)
+      age = %Ash.Query.Ref{attribute: :age, relationship_path: []}
+      name = %Ash.Query.Ref{attribute: :name, relationship_path: []}
+
+      assert {:ok, [30, "alice"]} =
+               DataLayer.calculate(FakeResource, [age, name], %{primary_key: %{id: "id-1"}})
     end
 
-    test "an anonymous function (expr) calculation is applied to each record" do
-      q = DataLayer.resource_to_query(FakeResource, nil)
-      calc = %{name: :doubled_age, expr: fn record -> record.age * 2 end}
-      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
+    test "an expression that cannot be evaluated reports an error rather than a value" do
+      FakeRepo.set_mode(FakeRepo, :rows)
 
-      {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
-      assert Map.get(record, :doubled_age) == 60
+      expr = %Ash.Query.Ref{attribute: :missing_attribute, relationship_path: []}
+
+      assert {:error, _reason} =
+               DataLayer.calculate(FakeResource, [expr], %{primary_key: %{id: "id-1"}})
     end
 
-    test "a calculation with neither module nor expr is ignored" do
-      q = DataLayer.resource_to_query(FakeResource, nil)
-      calc = %{name: :mystery}
-      {:ok, q2} = DataLayer.calculate(q, calc, FakeResource)
-
-      {:ok, [record]} = DataLayer.run_query(q2, FakeResource)
-      refute Map.has_key?(record, :mystery)
+    test "a calculation without a primary key reports an error" do
+      assert {:error, _reason} = DataLayer.calculate(FakeResource, [], %{})
     end
   end
 
@@ -541,25 +534,54 @@ defmodule AshClickhouse.DataLayerEdgeTest do
   describe "can?/2" do
     test "unsupported combination/tuple features return false" do
       resource = FakeResource
-      assert DataLayer.can?(resource, {:combine, :union}) == false
       assert DataLayer.can?(resource, {:join, :inner}) == false
-      assert DataLayer.can?(resource, {:filter_relationship, :foo}) == false
-      assert DataLayer.can?(resource, {:exists, :unrelated}) == false
-      assert DataLayer.can?(resource, {:aggregate_relationship, :foo}) == false
+      assert DataLayer.can?(resource, {:combine, :except}) == false
+      assert DataLayer.can?(resource, {:combine, :intersect}) == false
+    end
+
+    test "combining queries is supported" do
+      assert DataLayer.can?(FakeResource, :combine)
+      assert DataLayer.can?(FakeResource, {:combine, :base})
+      assert DataLayer.can?(FakeResource, {:combine, :union})
+      assert DataLayer.can?(FakeResource, {:combine, :union_all})
+    end
+
+    test "filtering across a relationship and an unrelated existence check are supported" do
+      assert DataLayer.can?(FakeResource, {:filter_relationship, :orders})
+      assert DataLayer.can?(FakeResource, {:exists, :unrelated})
+
+      # A relationship path of more than one hop cannot be expressed as a
+      # semi-join.
+      assert DataLayer.can?(FakeResource, {:filter_relationship, [:orders, :items]}) == false
+    end
+
+    test "aggregating over a relationship is supported" do
+      assert DataLayer.can?(FakeResource, {:aggregate_relationship, :foo})
     end
 
     test "supported aggregate kinds return true, others false" do
-      for kind <- [:count, :sum, :avg, :min, :max] do
+      for kind <- [:count, :sum, :avg, :min, :max, :first, :list, :exists] do
         assert DataLayer.can?(FakeResource, {:aggregate, kind})
         assert DataLayer.can?(FakeResource, {:query_aggregate, kind})
       end
 
       assert DataLayer.can?(FakeResource, {:aggregate, :custom}) == false
-      assert DataLayer.can?(FakeResource, {:query_aggregate, :list}) == false
+      assert DataLayer.can?(FakeResource, {:query_aggregate, :custom}) == false
     end
 
     test "filter_expr and sort tuples are supported" do
-      assert DataLayer.can?(FakeResource, {:filter_expr, :foo})
+      # `{:filter_expr, expr}` is answered precisely: only the expressions the
+      # query builder can translate are reported as supported.
+      assert DataLayer.can?(
+               FakeResource,
+               {:filter_expr,
+                %Ash.Query.Operator.Eq{
+                  left: %Ash.Query.Ref{attribute: :name},
+                  right: "x"
+                }}
+             )
+
+      refute DataLayer.can?(FakeResource, {:filter_expr, :foo})
       assert DataLayer.can?(FakeResource, {:sort, :name})
     end
 
@@ -572,7 +594,6 @@ defmodule AshClickhouse.DataLayerEdgeTest do
             :update_many,
             :composite_type,
             :through_relationship,
-            :expression_calculation_sort,
             :aggregate_filter,
             :aggregate_sort,
             :bulk_create_with_partial_success,

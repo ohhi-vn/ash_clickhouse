@@ -109,5 +109,8 @@ aggregates do
 end
 ```
 
-Aggregates supported natively: `count`, `sum`, `avg`, `min`, `max`.
-Calculations are computed in memory.
+Aggregates supported natively: `count`, `sum`, `avg`, `min`, `max`, `first`,
+`list`, `exists`. An aggregate's own `filter:` and `sort:` are applied to the
+rows it considers. An expression calculation is evaluated by ClickHouse — the
+expression is projected into the `SELECT` list and the value is reported on the
+record.

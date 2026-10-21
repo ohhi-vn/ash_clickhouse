@@ -1,5 +1,141 @@
 # Changelog
 
+## 0.8.0
+
+### Features
+
+- **Expression calculations are evaluated by the data layer.** `add_calculations/3`
+  and `add_calculation/4` are implemented, so the expression is pushed into the
+  ClickHouse `SELECT` list as an aliased expression and the database computes
+  the value. The calculated value is reported on the record's `calculations`
+  map, decoded with the calculation's declared type. A calculation the layer
+  cannot translate is evaluated against the decoded record instead.
+- **`calculate/3` has the behaviour's shape.** The callback now takes
+  `(resource, exprs, context)` — as `Ash.DataLayer` specifies — and evaluates
+  the expressions against the record the context's primary key identifies,
+  returning one value per expression.
+- **Filter expressions are translated from Ash's real expression shapes.** The
+  query builder now matches the concrete `%Ash.Query.Operator.*` and
+  `%Ash.Query.Function.*` structs, so `!=` (`%Ash.Query.Operator.NotEq{}`),
+  `contains/2`, `string_starts_with/2`, `string_ends_with/2`, `has/2` and
+  `intersects/2` all translate to ClickHouse predicates. The legacy
+  `{op, name, right}` shape still reaches the same translation.
+- **`can?({:filter_expr, expr})` is answered precisely.** The layer reports
+  support only for the expressions it can translate, so an unsupported filter
+  is refused when the query is built — with an error naming the expression —
+  instead of failing later with an opaque `QueryError`.
+- **Aggregates honour their own `filter`, `sort` and `join_filters`.** A
+  filtered aggregate counts the rows that match its own filter rather than every
+  row, and a `first`/`list` aggregate honours its sort.
+- **Aggregates are de-duplicated.** Ash calls `add_aggregates/3` twice with the
+  same list; the aggregate is now issued once, so a read loading N relationship
+  aggregates issues N aggregate queries instead of 2N.
+- **The `:first`, `:list` and `:exists` aggregate kinds are supported**, both
+  as `{:aggregate, kind}` and `{:query_aggregate, kind}`.
+- **Relationship filters and aggregates are supported.** A filter that reaches
+  into a related resource is answered with a semi-join — the queried
+  resource's key is tested against a subquery over the related table — so the
+  number of returned rows does not depend on how many related rows match. An
+  aggregate over a relationship is computed with one grouped query for the
+  whole result set, so a resource declaring one compiles.
+- **Unrelated existence checks are supported**, answered with
+  `EXISTS (SELECT 1 ...)`.
+- **Combination queries are supported**, run as a single `UNION` statement
+  against the database.
+- **`Ash.Query.distinct_sort/2` is supported**, rendered with ClickHouse's
+  `LIMIT 1 BY`.
+- **`Ash.Query.timeout/2` is supported**, mapped onto the `max_execution_time`
+  setting. The timeout is read from the query's context.
+- **`default_bulk_batch_size/2` is declared**, so Ash's own chunking matches
+  the layer's internal insert batching.
+- **Sorting by an expression calculation is supported**: the calculation is
+  projected into the select list and ordered by its alias.
+- **The layer publishes its ClickHouse functions** through `functions/1`, so a
+  filter can use a ClickHouse-specific function that Ash does not provide —
+  `match/2` is published today.
+
+### Bug fixes
+
+- **Reading a resource that declares an expression calculation no longer
+  raises.** `can?(:expression_calculation)` reported support while
+  `add_calculations/3` and `add_calculation/4` were not implemented, so Ash
+  fell through to `apply(data_layer_module, :add_calculation, ...)` and every
+  read of such a resource failed with an `UndefinedFunctionError`.
+- **The one-off calculation no longer raises a `MatchError`.** `calculate/3`
+  had the same arity as the behaviour's callback but its arguments in the wrong
+  order, so Ash called it with the resource first and the layer tried to match
+  it against a data layer query.
+- **A `!=` filter no longer raises `AshClickhouse.Error.QueryError`.** Ash
+  represents `!=` as `%Ash.Query.Operator.NotEq{operator: :!=}`, which the
+  query builder only matched under the `:not_eq` spelling.
+- **A function-shaped filter no longer raises `AshClickhouse.Error.QueryError`.**
+  `contains(name, "bo")` and the other `%Ash.Query.Function.*` predicates were
+  not translated at all.
+- **A filtered aggregate no longer reports the wrong count.** An aggregate's own
+  `filter:` was never read, so `count :paid_count, [], filter: [status: "paid"]`
+  counted every row.
+- **An aggregate is no longer issued twice.** Ash calls `add_aggregates/3` twice
+  with the same list and the layer did not de-duplicate it, so a read loading N
+  relationship aggregates issued 2N ClickHouse queries.
+- **A resource declaring an aggregate over a relationship no longer fails to
+  compile** with "is not aggregatable".
+- **`Ash.Query.distinct_sort/2` and `Ash.Query.timeout/2` no longer raise.**
+  Both were refused because the layer reported them as unsupported.
+- **A combination query is no longer refused.** `can?(:combine)` reported
+  `false`, which made `Ash.DataLayer.combination_of/3` return "Data layer does
+  not support combining queries".
+
+### Documentation
+
+- The data layer's moduledoc and `guides/limitations.md` no longer claim that
+  combination queries are "executed by Ash in memory" — that fallback does not
+  exist in Ash 3.33. Both now describe the delivered behaviour.
+
+## 0.7.9
+
+### Bug fixes
+
+- **A `DateTime64` column declared without an explicit precision is no longer
+  written as a bare integer.** The encoder decided between the `DateTime64`
+  form and the plain-`DateTime` form by matching the literal `"DateTime64("`
+  against the resolved column type, so a column declared as `DateTime64` —
+  whose ClickHouse precision defaults to 3 — did not match and fell through to
+  the plain-`DateTime` branch. It was written as a bare JSON *integer* number
+  of seconds, which is the form ClickHouse's numeric interpretation does not
+  pin down: with `input_format_read_datetime_number_as_raw_value = 1` (or
+  `compatibility = '26.7'`) a bare integer is read as the column's raw value —
+  ticks at the column precision — not as seconds. Measured against ClickHouse
+  26.9.20.23, the old form stored `2024-01-02 03:04:05.000` by default but
+  **`1970-01-20 17:22:44.645`** with that setting enabled; the new form
+  stores the same instant under both configurations. The old form also
+  silently dropped the value's microseconds, being whole seconds.
+  `DateTime64` columns are now recognised whatever their declaration —
+  `DateTime64`, `DateTime64(N)`, `DateTime64(N, 'UTC')` — and use the quoted
+  decimal Unix-seconds string every `DateTime64` column already used.
+
+## 0.7.8
+
+### Bug fixes
+
+- **`Ash.bulk_create/4` no longer raises when the caller asks for the inserted
+  records back.** With `return_records?: true` — or `notify?: true`, which
+  makes Ash ask for the records so the action's notifiers can read them — the
+  bulk path raised `Ash.Error.Unknown` wrapping
+  `BadMapError: expected a map, got: nil`, *after* the rows had already been
+  written to ClickHouse. The cause was the data layer returning records with
+  no bulk correlation metadata: Ash matches a returned record back to the
+  changeset that produced it through `__metadata__.bulk_action_ref` /
+  `bulk_create_index`, and with neither present the lookup found nothing and
+  the write failed. Returned records now carry that metadata, the way
+  `Ash.DataLayer.Ets` and `AshScylla` already do.
+- **Records returned by `bulk_create` now carry the values that were
+  submitted, not the wire encoding.** The data layer was rebuilding the
+  returned record from the *encoded* rows it sent to ClickHouse, so a
+  `:utc_datetime` attribute came back as the string `"1704164645.123456"`
+  instead of a `%DateTime{}` and a `:date` attribute as the integer `19724`
+  instead of a `%Date{}`. The single-record `create` path already returned the
+  submitted values; the bulk path now agrees with it.
+
 ## 0.7.7
 
 ### Bug fixes

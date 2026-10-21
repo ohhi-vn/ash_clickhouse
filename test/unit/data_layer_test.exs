@@ -28,7 +28,15 @@ defmodule AshClickhouse.DataLayerTest do
       refute DataLayer.can?(nil, :keyset)
       refute DataLayer.can?(nil, :upsert)
       refute DataLayer.can?(nil, :join)
-      refute DataLayer.can?(nil, :combine)
+    end
+
+    test "supports combination queries" do
+      assert DataLayer.can?(nil, :combine)
+      assert DataLayer.can?(nil, {:combine, :base})
+      assert DataLayer.can?(nil, {:combine, :union})
+      assert DataLayer.can?(nil, {:combine, :union_all})
+      refute DataLayer.can?(nil, {:combine, :except})
+      refute DataLayer.can?(nil, {:combine, :intersect})
     end
   end
 
